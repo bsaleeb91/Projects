@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  secrets: write
 
 jobs:
   run-brief:
@@ -41,11 +40,3 @@ jobs:
       - name: Run morning brief
         run: python morning_brief.py
 
-      - name: Refresh GOOGLE_TOKEN secret
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -f token.json ]; then
-            gh secret set GOOGLE_TOKEN --repo ${{ github.repository }} < token.json
-          fi
