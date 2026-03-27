@@ -1,0 +1,50 @@
+name: Morning Brief
+
+on:
+  schedule:
+    - cron: '10 11 * * 1-5'  # 7:10 AM ET (EDT, UTC-4), weekdays
+  workflow_dispatch:           # allows manual "Run workflow" button in GitHub UI
+
+permissions:
+  contents: read
+
+jobs:
+  run-brief:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install anthropic google-auth google-auth-oauthlib google-api-python-client requests python-dotenv
+
+      - name: Write secrets to disk
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+          MY_EMAIL: ${{ secrets.MY_EMAIL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TODOIST_API_KEY: ${{ secrets.TODOIST_API_KEY }}
+        run: |
+          echo "$GOOGLE_CREDENTIALS" > credentials.json
+          echo "$GOOGLE_TOKEN" > token.json
+          printf "MY_EMAIL=%s\nANTHROPIC_API_KEY=%s\nTODOIST_API_KEY=%s\n" \
+            "$MY_EMAIL" "$ANTHROPIC_API_KEY" "$TODOIST_API_KEY" > .env
+
+      - name: Run morning brief
+        run: python morning_brief.py
+
+      - name: Refresh GOOGLE_TOKEN secret
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f token.json ]; then
+            gh secret set GOOGLE_TOKEN --repo ${{ github.repository }} < token.json
+          fi
