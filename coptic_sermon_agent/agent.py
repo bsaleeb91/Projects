@@ -2,25 +2,30 @@
 """
 Coptic Orthodox Sermon Agent
 Surfaces popular Arabic sermons by famous Coptic priests,
-translated and ranked for English-speaking audiences.
+translated, ranked, and delivered as a monthly HTML digest via email.
 
 Usage:
-    python agent.py                  # Top 20 sermons across all priests
-    python agent.py --topic Prayer   # Filter by topic
-    python agent.py --top 10         # Show top N results
+    python agent.py                  # Full run: fetch, rank, save HTML, email
+    python agent.py --topic Prayer   # Filter results by topic
+    python agent.py --no-email       # Skip email, just save HTML
+    python agent.py --top 30         # Show top N results (default 25)
 """
 
 import os
+import re
 import json
 import argparse
+import smtplib
 from datetime import datetime, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
-from rich import box
 from rich.console import Console
-from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 load_dotenv()
 console = Console()
@@ -35,29 +40,31 @@ PRIESTS = [
     {"name": "Fr. Pishoy Kamel",          "arabic": "القمص بيشوي كامل",            "weight": 1.0},
     {"name": "Fr. Mina Aboud Sharoubeam", "arabic": "القمص مينا عبود شروبيم",      "weight": 1.0},
     {"name": "Bishop Youssef",            "arabic": "الأنبا يوسف",                 "weight": 1.0},
-    {"name": "Fr. Daoud Lamei",           "arabic": "أبونا داود لمعي",             "weight": 1.4},  # prioritized
+    {"name": "Fr. Daoud Lamei",           "arabic": "أبونا داود لمعي",             "weight": 1.4},
     {"name": "Fr. Bishoy Helmy",          "arabic": "أبونا بيشوى حلمى",            "weight": 1.0},
     {"name": "Fr. George Boules",         "arabic": "القمص بولس جورج",             "weight": 1.0},
-    {"name": "Fr. Luka Maher",            "arabic": "أبونا لوقا ماهر",             "weight": 1.4},  # prioritized
+    {"name": "Fr. Luka Maher",            "arabic": "أبونا لوقا ماهر",             "weight": 1.4},
     {"name": "Bishop Thomas",             "arabic": "الأنبا توماس",                "weight": 1.0},
 ]
 
-RESULTS_PER_PRIEST = 8   # YouTube searches per priest
-DEFAULT_TOP_N       = 20  # Final results to display
+VIDEOS_PER_PRIEST    = 50   # YouTube max per search call
+PLAYLISTS_PER_PRIEST = 5    # Top playlists to inspect per priest
+DEFAULT_TOP_N        = 25
+REPORTS_DIR          = Path(__file__).parent / "reports"
 
 
 # ---------------------------------------------------------------------------
-# YouTube helpers
+# YouTube: individual videos
 # ---------------------------------------------------------------------------
 
-def search_sermons(youtube, priest: dict) -> list[dict]:
-    """Return sermon videos for one priest with view/like statistics."""
+def search_videos(youtube, priest: dict) -> list[dict]:
+    """Return up to VIDEOS_PER_PRIEST sermon videos for one priest."""
     query = f"{priest['arabic']} عظة"
 
     search_resp = youtube.search().list(
         q=query,
         part="snippet",
-        maxResults=RESULTS_PER_PRIEST,
+        maxResults=VIDEOS_PER_PRIEST,
         type="video",
         relevanceLanguage="ar",
         order="viewCount",
@@ -77,17 +84,92 @@ def search_sermons(youtube, priest: dict) -> list[dict]:
         stats   = item.get("statistics", {})
         snippet = item.get("snippet", {})
         videos.append({
-            "video_id":      item["id"],
-            "priest":        priest["name"],
-            "priest_weight": priest["weight"],
-            "title_ar":      snippet.get("title", ""),
+            "video_id":       item["id"],
+            "priest":         priest["name"],
+            "priest_weight":  priest["weight"],
+            "title_ar":       snippet.get("title", ""),
             "description_ar": snippet.get("description", "")[:600],
-            "published_at":  snippet.get("publishedAt", ""),
-            "views":         int(stats.get("viewCount", 0)),
-            "likes":         int(stats.get("likeCount", 0)),
-            "url":           f"https://youtube.com/watch?v={item['id']}",
+            "published_at":   snippet.get("publishedAt", ""),
+            "views":          int(stats.get("viewCount", 0)),
+            "likes":          int(stats.get("likeCount", 0)),
+            "url":            f"https://youtube.com/watch?v={item['id']}",
+            "playlist_id":    None,
         })
 
+    return videos
+
+
+# ---------------------------------------------------------------------------
+# YouTube: series / playlists
+# ---------------------------------------------------------------------------
+
+def search_playlists(youtube, priest: dict) -> list[dict]:
+    """Return top playlists for one priest."""
+    query = f"{priest['arabic']} سلسلة عظات"
+
+    resp = youtube.search().list(
+        q=query,
+        part="snippet",
+        maxResults=PLAYLISTS_PER_PRIEST,
+        type="playlist",
+        relevanceLanguage="ar",
+    ).execute()
+
+    playlists = []
+    for item in resp.get("items", []):
+        pid     = item["id"]["playlistId"]
+        snippet = item.get("snippet", {})
+        playlists.append({
+            "playlist_id":    pid,
+            "priest":         priest["name"],
+            "priest_weight":  priest["weight"],
+            "title_ar":       snippet.get("title", ""),
+            "description_ar": snippet.get("description", "")[:400],
+        })
+
+    return playlists
+
+
+def fetch_playlist_videos(youtube, playlist: dict) -> list[dict]:
+    """Fetch all video IDs in a playlist, then get their stats."""
+    items_resp = youtube.playlistItems().list(
+        playlistId=playlist["playlist_id"],
+        part="snippet",
+        maxResults=50,
+    ).execute()
+
+    video_ids = [
+        item["snippet"]["resourceId"]["videoId"]
+        for item in items_resp.get("items", [])
+        if item["snippet"].get("resourceId", {}).get("kind") == "youtube#video"
+    ]
+    if not video_ids:
+        return []
+
+    stats_resp = youtube.videos().list(
+        id=",".join(video_ids),
+        part="statistics,snippet",
+    ).execute()
+
+    videos = []
+    for item in stats_resp.get("items", []):
+        stats   = item.get("statistics", {})
+        snippet = item.get("snippet", {})
+        videos.append({
+            "video_id":       item["id"],
+            "priest":         playlist["priest"],
+            "priest_weight":  playlist["priest_weight"],
+            "title_ar":       snippet.get("title", ""),
+            "description_ar": snippet.get("description", "")[:400],
+            "published_at":   snippet.get("publishedAt", ""),
+            "views":          int(stats.get("viewCount", 0)),
+            "likes":          int(stats.get("likeCount", 0)),
+            "url":            f"https://youtube.com/watch?v={item['id']}",
+            "playlist_id":    playlist["playlist_id"],
+        })
+
+    # Sort episodes by publish date (oldest first = Ep. 1 at top)
+    videos.sort(key=lambda v: v["published_at"])
     return videos
 
 
@@ -97,20 +179,11 @@ def search_sermons(youtube, priest: dict) -> list[dict]:
 
 def compute_score(video: dict, max_views: int) -> float:
     """
-    Composite score formula (before priest weight):
-        0.5 × normalized_views  (raw popularity)
-      + 0.3 × like_ratio        (engagement quality)
-      + 0.2 × recency_score     (freshness: decays over ~1 year)
-
-    Final score = priest_weight × composite
+    score = priest_weight × (0.5·views + 0.3·like_ratio + 0.2·recency)
     """
-    # Views (normalised against the most-viewed video in the set)
     normalized_views = video["views"] / max_views if max_views > 0 else 0.0
+    like_ratio       = video["likes"] / video["views"] if video["views"] > 0 else 0.0
 
-    # Like ratio — engagement quality signal
-    like_ratio = video["likes"] / video["views"] if video["views"] > 0 else 0.0
-
-    # Recency — decays to ~0.5 at 1 year, ~0.33 at 2 years
     try:
         published = datetime.fromisoformat(video["published_at"].replace("Z", "+00:00"))
         days_old  = (datetime.now(timezone.utc) - published).days
@@ -118,42 +191,51 @@ def compute_score(video: dict, max_views: int) -> float:
         days_old = 365
     recency = 1.0 / (1.0 + days_old / 365.0)
 
-    composite   = 0.5 * normalized_views + 0.3 * like_ratio + 0.2 * recency
+    composite = 0.5 * normalized_views + 0.3 * like_ratio + 0.2 * recency
     return video["priest_weight"] * composite
 
 
+def score_series(playlist: dict, episodes: list[dict], max_views: int) -> float:
+    """
+    Series score = priest_weight × (total_views / max_views) × log-boost for episode count.
+    More episodes = richer series, slight bonus.
+    """
+    import math
+    total_views      = sum(e["views"] for e in episodes)
+    normalized       = total_views / max_views if max_views > 0 else 0.0
+    episode_boost    = math.log2(max(len(episodes), 1) + 1) / 5.0  # small bonus
+    return playlist["priest_weight"] * (normalized + episode_boost)
+
+
 # ---------------------------------------------------------------------------
-# Claude: Arabic → English translation & summarization
+# Claude: translate & summarize
 # ---------------------------------------------------------------------------
 
-def translate_and_summarize(client: anthropic.Anthropic, videos: list[dict]) -> list[dict]:
+def translate_and_summarize(client: anthropic.Anthropic, items: list[dict]) -> list[dict]:
     """
-    Send Arabic sermon metadata to Claude Opus 4.6.
-    Returns each video enriched with:
-      - english_title
-      - summary (2 sentences)
-      - topic_tag
+    Send Arabic sermon metadata (videos or series) to Claude Opus 4.6.
+    Returns items enriched with: english_title, summary, topic_tag.
     """
     payload = [
         {
             "index":          i,
             "priest":         v["priest"],
             "title_ar":       v["title_ar"],
-            "description_ar": v["description_ar"],
+            "description_ar": v.get("description_ar", ""),
         }
-        for i, v in enumerate(videos)
+        for i, v in enumerate(items)
     ]
 
     system = (
-        "You are an expert in Coptic Orthodox theology and fluent in Arabic. "
-        "You translate Arabic sermon metadata into clear, natural English. "
+        "You are an expert in Coptic Orthodox theology, fluent in Arabic. "
+        "Translate Arabic sermon metadata into clear, natural English. "
         "Be concise and faithful to the original meaning."
     )
 
     user_prompt = f"""For each sermon below, return a JSON array. Each object must have:
 - "index"         : same integer as in input
 - "english_title" : natural English translation of title_ar
-- "summary"       : exactly 2 sentences describing the sermon's topic and key message
+- "summary"       : exactly 2 sentences describing the sermon topic and key message
 - "topic_tag"     : exactly one of:
     Repentance | Prayer | Fasting | Love | Salvation | Marriage |
     Youth | Theology | Spiritual Life | Saints | Bible Study |
@@ -173,79 +255,317 @@ Return ONLY a valid JSON array — no markdown, no commentary."""
     ) as stream:
         response = stream.get_final_message()
 
-    raw_text = next(b.text for b in response.content if b.type == "text")
+    raw = next(b.text for b in response.content if b.type == "text").strip()
 
-    # Strip accidental markdown fences if present
-    raw_text = raw_text.strip()
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("```", 2)[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.rsplit("```", 1)[0].strip()
+    # Strip accidental markdown fences
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.rsplit("```", 1)[0].strip()
 
-    enriched = json.loads(raw_text)
-    enriched_map = {item["index"]: item for item in enriched}
+    enriched_map = {e["index"]: e for e in json.loads(raw)}
 
-    for i, video in enumerate(videos):
+    for i, item in enumerate(items):
         info = enriched_map.get(i, {})
-        video["english_title"] = info.get("english_title", video["title_ar"])
-        video["summary"]       = info.get("summary", "")
-        video["topic_tag"]     = info.get("topic_tag", "Other")
+        item["english_title"] = info.get("english_title", item["title_ar"])
+        item["summary"]       = info.get("summary", "")
+        item["topic_tag"]     = info.get("topic_tag", "Other")
 
-    return videos
+    return items
 
 
 # ---------------------------------------------------------------------------
-# Display
+# HTML report
 # ---------------------------------------------------------------------------
 
-def display_results(videos: list[dict], topic_filter: str | None) -> None:
-    title = "Coptic Orthodox Sermons"
-    if topic_filter:
-        title += f" — Topic: {topic_filter}"
+TOPIC_COLORS = {
+    "Repentance":    "#ef4444",
+    "Prayer":        "#8b5cf6",
+    "Fasting":       "#f59e0b",
+    "Love":          "#ec4899",
+    "Salvation":     "#10b981",
+    "Marriage":      "#f97316",
+    "Youth":         "#06b6d4",
+    "Theology":      "#6366f1",
+    "Spiritual Life":"#14b8a6",
+    "Saints":        "#a78bfa",
+    "Bible Study":   "#84cc16",
+    "Confession":    "#fb923c",
+    "Holy Spirit":   "#38bdf8",
+    "Other":         "#94a3b8",
+}
 
-    table = Table(
-        title=title,
-        box=box.ROUNDED,
-        show_lines=True,
-        title_style="bold white",
-        expand=False,
-    )
 
-    table.add_column("#",            style="dim",        width=3,  justify="right")
-    table.add_column("Priest",       style="cyan",        width=22)
-    table.add_column("Sermon (EN)",  style="bold white",  width=34)
-    table.add_column("Topic",        style="yellow",      width=14)
-    table.add_column("Views",        style="green",       width=9,  justify="right")
-    table.add_column("Score",        style="magenta",     width=6,  justify="right")
-    table.add_column("Summary",      style="white",       width=50)
-    table.add_column("Link",         style="blue",        width=42)
+def _topic_badge(tag: str) -> str:
+    color = TOPIC_COLORS.get(tag, "#94a3b8")
+    return f'<span class="badge" style="background:{color}">{tag}</span>'
 
-    for rank, v in enumerate(videos, 1):
-        star   = " [bold yellow]★[/bold yellow]" if v["priest_weight"] > 1.0 else ""
-        priest = v["priest"] + star
-        views  = f"{v['views']:,}"
-        score  = f"{v['final_score']:.3f}"
 
-        table.add_row(
-            str(rank),
-            priest,
-            v["english_title"],
-            v["topic_tag"],
-            views,
-            score,
-            v["summary"],
-            v["url"],
-        )
+def _star(weight: float) -> str:
+    return ' <span class="star">★</span>' if weight > 1.0 else ""
 
-    console.print()
-    console.print(table)
-    console.print(
-        "\n[dim]"
-        "★ = prioritized priest (1.4× weight)  |  "
-        "Score = priest_weight × (0.5·views + 0.3·likes + 0.2·recency)"
-        "[/dim]\n"
-    )
+
+def generate_html(
+    sermons: list[dict],
+    series_list: list[dict],
+    run_date: str,
+    topic_filter: str | None,
+) -> str:
+
+    # ── Individual sermon cards ────────────────────────────────────────────
+    sermon_cards = ""
+    for rank, s in enumerate(sermons, 1):
+        sermon_cards += f"""
+        <div class="card">
+          <div class="card-header">
+            <span class="rank">#{rank}</span>
+            <span class="priest">{s['priest']}{_star(s['priest_weight'])}</span>
+            {_topic_badge(s['topic_tag'])}
+          </div>
+          <h3 class="sermon-title">
+            <a href="{s['url']}" target="_blank">{s['english_title']}</a>
+          </h3>
+          <p class="summary">{s['summary']}</p>
+          <div class="meta">
+            <span>👁 {s['views']:,} views</span>
+            <span>Score: {s['final_score']:.3f}</span>
+            <a class="watch-btn" href="{s['url']}" target="_blank">Watch ▶</a>
+          </div>
+        </div>"""
+
+    # ── Series cards ───────────────────────────────────────────────────────
+    series_cards = ""
+    for rank, s in enumerate(series_list, 1):
+        episodes_html = ""
+        for ep_num, ep in enumerate(s["episodes"], 1):
+            episodes_html += f"""
+            <div class="episode">
+              <span class="ep-num">Ep.{ep_num}</span>
+              <a href="{ep['url']}" target="_blank">{ep.get('english_title', ep['title_ar'])}</a>
+              <span class="ep-views">{ep['views']:,} views</span>
+            </div>"""
+
+        total_views = sum(e["views"] for e in s["episodes"])
+        series_cards += f"""
+        <div class="card series-card">
+          <div class="card-header">
+            <span class="rank">#{rank}</span>
+            <span class="priest">{s['priest']}{_star(s['priest_weight'])}</span>
+            {_topic_badge(s.get('topic_tag', 'Other'))}
+          </div>
+          <h3 class="sermon-title">{s.get('english_title', s['title_ar'])}</h3>
+          <p class="summary">{s.get('summary', '')}</p>
+          <div class="meta">
+            <span>📺 {len(s['episodes'])} episodes</span>
+            <span>👁 {total_views:,} total views</span>
+            <span>Score: {s['series_score']:.3f}</span>
+          </div>
+          <div class="episodes">{episodes_html}</div>
+        </div>"""
+
+    if not series_cards:
+        series_cards = '<p class="empty">No series detected this month.</p>'
+
+    filter_note = f"<p class='filter-note'>Filtered by topic: <strong>{topic_filter}</strong></p>" if topic_filter else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coptic Sermon Digest — {run_date}</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }}
+    .container {{ max-width: 860px; margin: 0 auto; }}
+
+    /* Header */
+    header {{ text-align: center; margin-bottom: 3rem; }}
+    header h1 {{
+      font-size: 2rem;
+      color: #f59e0b;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.3rem;
+    }}
+    header .cross {{ font-size: 2rem; display: block; margin-bottom: 0.5rem; }}
+    header p {{ color: #94a3b8; font-size: 0.95rem; }}
+    .filter-note {{
+      display: inline-block;
+      margin-top: 0.5rem;
+      background: #1e293b;
+      padding: 0.3rem 0.8rem;
+      border-radius: 1rem;
+      font-size: 0.85rem;
+      color: #f59e0b;
+    }}
+
+    /* Section headings */
+    .section-title {{
+      font-size: 1.3rem;
+      color: #f59e0b;
+      border-bottom: 1px solid #1e3a5f;
+      padding-bottom: 0.5rem;
+      margin: 2.5rem 0 1.2rem;
+    }}
+
+    /* Cards */
+    .card {{
+      background: #1e293b;
+      border: 1px solid #1e3a5f;
+      border-radius: 12px;
+      padding: 1.2rem 1.4rem;
+      margin-bottom: 1rem;
+      transition: border-color 0.2s;
+    }}
+    .card:hover {{ border-color: #f59e0b44; }}
+    .series-card {{ border-left: 3px solid #f59e0b; }}
+
+    .card-header {{
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.6rem;
+      flex-wrap: wrap;
+    }}
+    .rank {{
+      color: #475569;
+      font-weight: 700;
+      font-size: 0.85rem;
+      min-width: 2rem;
+    }}
+    .priest {{
+      color: #38bdf8;
+      font-weight: 600;
+      font-size: 0.9rem;
+    }}
+    .star {{ color: #f59e0b; }}
+
+    .badge {{
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      color: #fff;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }}
+
+    .sermon-title {{ font-size: 1.05rem; margin-bottom: 0.5rem; }}
+    .sermon-title a {{ color: #e2e8f0; text-decoration: none; }}
+    .sermon-title a:hover {{ color: #f59e0b; }}
+
+    .summary {{ color: #94a3b8; font-size: 0.88rem; margin-bottom: 0.8rem; }}
+
+    .meta {{
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      font-size: 0.82rem;
+      color: #64748b;
+      flex-wrap: wrap;
+    }}
+    .watch-btn {{
+      margin-left: auto;
+      background: #f59e0b;
+      color: #0f172a;
+      font-weight: 700;
+      padding: 0.3rem 0.9rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.82rem;
+    }}
+    .watch-btn:hover {{ background: #fbbf24; }}
+
+    /* Episodes */
+    .episodes {{
+      margin-top: 1rem;
+      border-top: 1px solid #1e3a5f;
+      padding-top: 0.8rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }}
+    .episode {{
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+      font-size: 0.85rem;
+    }}
+    .ep-num {{ color: #f59e0b; font-weight: 700; min-width: 2.5rem; }}
+    .episode a {{ color: #cbd5e1; text-decoration: none; flex: 1; }}
+    .episode a:hover {{ color: #f59e0b; }}
+    .ep-views {{ color: #475569; white-space: nowrap; }}
+
+    .empty {{ color: #475569; font-style: italic; padding: 1rem 0; }}
+
+    /* Footer */
+    footer {{
+      margin-top: 3rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid #1e293b;
+      text-align: center;
+      font-size: 0.78rem;
+      color: #334155;
+      line-height: 2;
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <span class="cross">☩</span>
+      <h1>Coptic Orthodox Sermon Digest</h1>
+      <p>{run_date}</p>
+      {filter_note}
+    </header>
+
+    <h2 class="section-title">📺 Top Series</h2>
+    {series_cards}
+
+    <h2 class="section-title">🎙 Top Individual Sermons</h2>
+    {sermon_cards}
+
+    <footer>
+      ★ = prioritized priest (1.4× weight) &nbsp;|&nbsp;
+      Score = priest_weight × (0.5·views + 0.3·like_ratio + 0.2·recency)<br>
+      Generated by Claude Opus 4.6 · YouTube Data API v3
+    </footer>
+  </div>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
+# Email delivery
+# ---------------------------------------------------------------------------
+
+def send_email(html: str, run_date: str) -> None:
+    sender       = os.getenv("GMAIL_SENDER")
+    app_password = os.getenv("GMAIL_APP_PASSWORD")
+    recipient    = os.getenv("EMAIL_RECIPIENT")
+
+    if not all([sender, app_password, recipient]):
+        console.print("[yellow]Email skipped — GMAIL_SENDER / GMAIL_APP_PASSWORD / EMAIL_RECIPIENT not set.[/yellow]")
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"☩ Coptic Sermon Digest — {run_date}"
+    msg["From"]    = sender
+    msg["To"]      = recipient
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(sender, app_password)
+        server.sendmail(sender, recipient, msg.as_string())
+
+    console.print(f"[green]Email sent to {recipient}[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -254,72 +574,112 @@ def display_results(videos: list[dict], topic_filter: str | None) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Coptic Orthodox Sermon Agent")
-    parser.add_argument("--topic", type=str, default=None,
-                        help="Filter by topic tag (e.g. Prayer, Repentance, Youth)")
-    parser.add_argument("--top",   type=int, default=DEFAULT_TOP_N,
-                        help=f"Number of results to display (default: {DEFAULT_TOP_N})")
+    parser.add_argument("--topic",    type=str,  default=None,  help="Filter by topic tag")
+    parser.add_argument("--top",      type=int,  default=DEFAULT_TOP_N, help="Top N individual sermons")
+    parser.add_argument("--no-email", action="store_true", help="Skip email delivery")
     args = parser.parse_args()
 
     youtube_key   = os.getenv("YOUTUBE_API_KEY")
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
 
     if not youtube_key:
-        console.print("[bold red]Error:[/bold red] YOUTUBE_API_KEY not set in .env")
-        return
+        console.print("[bold red]Error:[/bold red] YOUTUBE_API_KEY not set in .env"); return
     if not anthropic_key:
-        console.print("[bold red]Error:[/bold red] ANTHROPIC_API_KEY not set in .env")
-        return
+        console.print("[bold red]Error:[/bold red] ANTHROPIC_API_KEY not set in .env"); return
 
     youtube = build("youtube", "v3", developerKey=youtube_key)
     claude  = anthropic.Anthropic(api_key=anthropic_key)
+    run_date = datetime.now().strftime("%B %Y")
 
-    # ── 1. Fetch from YouTube ──────────────────────────────────────────────
+    # ── 1. Fetch individual videos ─────────────────────────────────────────
     all_videos: list[dict] = []
-    for priest in PRIESTS:
-        console.print(f"[dim]  Searching: {priest['name']}...[/dim]")
-        videos = search_sermons(youtube, priest)
-        all_videos.extend(videos)
-        console.print(f"[dim]    → {len(videos)} videos found[/dim]")
+    all_playlists: list[dict] = []
 
-    if not all_videos:
-        console.print("[bold red]No sermons found. Check your YOUTUBE_API_KEY.[/bold red]")
-        return
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
+        task = progress.add_task("Fetching sermons from YouTube...", total=len(PRIESTS))
+        for priest in PRIESTS:
+            progress.update(task, description=f"Fetching: {priest['name']}...")
+            videos    = search_videos(youtube, priest)
+            playlists = search_playlists(youtube, priest)
+            all_videos.extend(videos)
+            all_playlists.extend(playlists)
+            progress.advance(task)
 
-    console.print(f"\n[green]Fetched {len(all_videos)} sermons total.[/green]")
+    console.print(f"[green]Found {len(all_videos)} videos and {len(all_playlists)} playlists.[/green]")
 
-    # ── 2. Score & rank ───────────────────────────────────────────────────
-    max_views = max(v["views"] for v in all_videos)
+    # ── 2. Score & rank individual videos ─────────────────────────────────
+    max_views = max((v["views"] for v in all_videos), default=1)
     for v in all_videos:
         v["final_score"] = compute_score(v, max_views)
 
     all_videos.sort(key=lambda v: v["final_score"], reverse=True)
+    candidates = all_videos[: args.top * 4]   # oversample before topic filter
 
-    # Take more than needed before topic filter so we still get top N after
-    candidates = all_videos[: args.top * 3]
+    # ── 3. Fetch & score series ────────────────────────────────────────────
+    series_data: list[dict] = []
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
+        task = progress.add_task("Fetching playlist episodes...", total=len(all_playlists))
+        for pl in all_playlists:
+            progress.update(task, description=f"Playlist: {pl['title_ar'][:40]}...")
+            episodes = fetch_playlist_videos(youtube, pl)
+            if len(episodes) >= 2:           # only treat as series if 2+ episodes
+                pl["episodes"]     = episodes
+                pl["series_score"] = score_series(pl, episodes, max_views)
+                series_data.append(pl)
+            progress.advance(task)
 
-    # ── 3. Translate & summarize with Claude ──────────────────────────────
+    # Deduplicate playlists (same playlist_id) and sort
+    seen_pids = set()
+    unique_series = []
+    for s in sorted(series_data, key=lambda x: x["series_score"], reverse=True):
+        if s["playlist_id"] not in seen_pids:
+            seen_pids.add(s["playlist_id"])
+            unique_series.append(s)
+    top_series = unique_series[:8]
+
+    # ── 4. Translate with Claude ───────────────────────────────────────────
     console.print("[dim]Translating Arabic content with Claude Opus 4.6...[/dim]")
+
+    # Translate individual sermons
     candidates = translate_and_summarize(claude, candidates)
 
-    # ── 4. Optional topic filter ──────────────────────────────────────────
+    # Translate series titles + episode titles
+    if top_series:
+        series_meta = [{"title_ar": s["title_ar"], "description_ar": s.get("description_ar", "")} for s in top_series]
+        series_meta = translate_and_summarize(claude, series_meta)
+        for s, meta in zip(top_series, series_meta):
+            s["english_title"] = meta.get("english_title", s["title_ar"])
+            s["summary"]       = meta.get("summary", "")
+            s["topic_tag"]     = meta.get("topic_tag", "Other")
+
+        all_episodes = [ep for s in top_series for ep in s["episodes"]]
+        if all_episodes:
+            all_episodes = translate_and_summarize(claude, all_episodes)
+            idx = 0
+            for s in top_series:
+                count = len(s["episodes"])
+                s["episodes"] = all_episodes[idx : idx + count]
+                idx += count
+
+    # ── 5. Optional topic filter ───────────────────────────────────────────
     if args.topic:
-        candidates = [
-            v for v in candidates
-            if args.topic.lower() in v["topic_tag"].lower()
-        ]
-        if not candidates:
-            console.print(
-                f"[yellow]No results matched topic '[bold]{args.topic}[/bold]'. "
-                f"Try one of: Repentance, Prayer, Fasting, Love, Salvation, "
-                f"Marriage, Youth, Theology, Spiritual Life, Saints, "
-                f"Bible Study, Confession, Holy Spirit, Other[/yellow]"
-            )
-            return
+        candidates  = [v for v in candidates  if args.topic.lower() in v["topic_tag"].lower()]
+        top_series  = [s for s in top_series  if args.topic.lower() in s.get("topic_tag", "").lower()]
 
-    top_results = candidates[: args.top]
+    top_sermons = candidates[: args.top]
 
-    # ── 5. Display ────────────────────────────────────────────────────────
-    display_results(top_results, args.topic)
+    # ── 6. Generate HTML ───────────────────────────────────────────────────
+    html = generate_html(top_sermons, top_series, run_date, args.topic)
+
+    REPORTS_DIR.mkdir(exist_ok=True)
+    filename = datetime.now().strftime("%Y-%m") + (".html" if not args.topic else f"-{args.topic.lower()}.html")
+    report_path = REPORTS_DIR / filename
+    report_path.write_text(html, encoding="utf-8")
+    console.print(f"[green]HTML report saved → {report_path}[/green]")
+
+    # ── 7. Email ───────────────────────────────────────────────────────────
+    if not args.no_email:
+        send_email(html, run_date)
 
 
 if __name__ == "__main__":
