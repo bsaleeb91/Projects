@@ -2,7 +2,7 @@ name: Morning Brief
 
 on:
   schedule:
-    - cron: '10 11 * * 1-5'  # 7:10 AM ET (EDT, UTC-4), weekdays
+    - cron: '10 11 * * *'  # 7:10 AM ET (EDT, UTC-4), every day
   workflow_dispatch:           # allows manual "Run workflow" button in GitHub UI
 
 permissions:
@@ -39,4 +39,3 @@ jobs:
 
       - name: Run morning brief
         run: python morning_brief.py
-
