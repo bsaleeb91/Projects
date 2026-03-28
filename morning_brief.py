@@ -50,8 +50,8 @@ def get_google_services():
     return gmail, calendar
 
 
-# ── Gmail: Fetch last 12 hours ────────────────────────────────────────────────
-def fetch_recent_emails(gmail_service, hours=12):
+# ── Gmail: Fetch last 24 hours ────────────────────────────────────────────────
+def fetch_recent_emails(gmail_service, hours=24):
     since  = int((datetime.datetime.utcnow() - datetime.timedelta(hours=hours)).timestamp())
     query  = f"after:{since} -category:promotions -category:social"
     results = gmail_service.users().messages().list(
@@ -143,7 +143,7 @@ About Bishoy:
 Produce a clean, scannable morning brief in HTML with inline styles. Structure:
 
 1. 📅 TODAY'S CALENDAR — list events with time and any location
-2. 🔴 ACTION REQUIRED — emails needing a reply, decision, or with a deadline. One line each with enough context to act. After each item, append a small "+ Todoist" link styled as a pill button (background #db4035, white text, border-radius 4px, font-size 11px, padding 1px 6px, no underline, margin-left 8px). The href must be: https://todoist.com/app/task/new?content= followed by a URL-encoded version of a concise task description (e.g., "Reply to [sender] re: [subject]").
+2. 🔴 ACTION REQUIRED — emails needing a reply, decision, or with a deadline. One line each with enough context to act. After each item, append a small "+ Todoist" link styled as a pill button (background #db4035, white text, border-radius 4px, font-size 11px, padding 1px 6px, no underline, margin-left 8px). The href must be: https://app.todoist.com/app/task/new?content= followed by a URL-encoded version of a concise task description (e.g., "Reply%20to%20sender%20re%3A%20subject"). Only use letters, numbers, spaces encoded as %20, and basic punctuation — no special characters.
 3. 💸 BILLS & FINANCIAL — any email from lenders, servicers, or billers (MOHELA, student loans,
    credit cards, utilities, insurance, bank alerts, payment confirmations, due-date notices).
    Flag overdue or past-due items in red. One line each with amount and due date if present.
@@ -167,7 +167,7 @@ Design rules:
 CALENDAR EVENTS:
 {json.dumps(events, indent=2)}
 
-EMAILS (last 12 hours):
+EMAILS (last 24 hours):
 {json.dumps(emails, indent=2)}
 
 TODOIST TASKS (today + overdue):
@@ -175,13 +175,22 @@ TODOIST TASKS (today + overdue):
 
 Generate the morning brief HTML."""
 
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=2000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    return message.content[0].text
+    for attempt in range(5):
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2000,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            return message.content[0].text
+        except Exception as e:
+            if "overloaded" in str(e).lower() and attempt < 4:
+                wait = 30 * (attempt + 1)
+                print(f"   API overloaded, retrying in {wait}s... (attempt {attempt+1}/5)")
+                import time; time.sleep(wait)
+            else:
+                raise
 
 
 # ── Gmail: Send the brief ─────────────────────────────────────────────────────
