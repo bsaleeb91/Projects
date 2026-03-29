@@ -12,10 +12,9 @@ Usage:
 """
 
 import os
-import re
+import base64
 import json
 import argparse
-import smtplib
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -23,6 +22,9 @@ from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -543,27 +545,59 @@ def generate_html(
 
 
 # ---------------------------------------------------------------------------
-# Email delivery
+# Email delivery (Google OAuth2 — same credentials as morning_brief.py)
 # ---------------------------------------------------------------------------
 
-def send_email(html: str, run_date: str) -> None:
-    sender       = os.getenv("GMAIL_SENDER")
-    app_password = os.getenv("GMAIL_APP_PASSWORD")
-    recipient    = os.getenv("EMAIL_RECIPIENT")
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
-    if not all([sender, app_password, recipient]):
-        console.print("[yellow]Email skipped — GMAIL_SENDER / GMAIL_APP_PASSWORD / EMAIL_RECIPIENT not set.[/yellow]")
+# Resolve paths relative to the *project root* (one level up from this file)
+_PROJECT_ROOT   = Path(__file__).parent.parent
+CREDENTIALS_FILE = _PROJECT_ROOT / "credentials.json"
+TOKEN_FILE       = _PROJECT_ROOT / "token.json"
+
+
+def _get_gmail_service():
+    """Return an authenticated Gmail service, refreshing the token if needed."""
+    creds = None
+
+    if TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), GMAIL_SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not CREDENTIALS_FILE.exists():
+                raise FileNotFoundError(
+                    f"credentials.json not found at {CREDENTIALS_FILE}. "
+                    "Copy it from the morning brief setup."
+                )
+            flow  = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), GMAIL_SCOPES)
+            creds = flow.run_local_server(port=0)
+
+        with open(TOKEN_FILE, "w") as f:
+            f.write(creds.to_json())
+
+    return build("gmail", "v1", credentials=creds)
+
+
+def send_email(html: str, run_date: str) -> None:
+    my_email  = os.getenv("MY_EMAIL")
+    recipient = os.getenv("EMAIL_RECIPIENT", my_email)
+
+    if not my_email:
+        console.print("[yellow]Email skipped — MY_EMAIL not set in .env[/yellow]")
         return
 
-    msg = MIMEMultipart("alternative")
+    msg            = MIMEMultipart("alternative")
     msg["Subject"] = f"☩ Coptic Sermon Digest — {run_date}"
-    msg["From"]    = sender
+    msg["From"]    = my_email
     msg["To"]      = recipient
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(sender, app_password)
-        server.sendmail(sender, recipient, msg.as_string())
+    raw     = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service = _get_gmail_service()
+    service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
     console.print(f"[green]Email sent to {recipient}[/green]")
 
