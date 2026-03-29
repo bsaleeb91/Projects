@@ -2,7 +2,7 @@
 credentials.json
 token.json
 .env
-*.txt
+*.log
 
 # Python
 __pycache__/
