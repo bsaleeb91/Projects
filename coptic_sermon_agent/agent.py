@@ -213,19 +213,16 @@ def score_series(playlist: dict, episodes: list[dict], max_views: int) -> float:
 # Claude: translate & summarize
 # ---------------------------------------------------------------------------
 
-def translate_and_summarize(client: anthropic.Anthropic, items: list[dict]) -> list[dict]:
-    """
-    Send Arabic sermon metadata (videos or series) to Claude Opus 4.6.
-    Returns items enriched with: english_title, summary, topic_tag.
-    """
+def _translate_batch(client: anthropic.Anthropic, batch: list[dict], offset: int) -> dict:
+    """Translate a single batch of items. Returns enriched_map keyed by original index."""
     payload = [
         {
-            "index":          i,
+            "index":          offset + i,
             "priest":         v["priest"],
             "title_ar":       v["title_ar"],
             "description_ar": v.get("description_ar", ""),
         }
-        for i, v in enumerate(items)
+        for i, v in enumerate(batch)
     ]
 
     system = (
@@ -250,7 +247,7 @@ Return ONLY a valid JSON array — no markdown, no commentary."""
 
     with client.messages.stream(
         model="claude-opus-4-6",
-        max_tokens=8192,
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
@@ -259,14 +256,24 @@ Return ONLY a valid JSON array — no markdown, no commentary."""
 
     raw = next(b.text for b in response.content if b.type == "text").strip()
 
-    # Strip accidental markdown fences
     if raw.startswith("```"):
         raw = raw.split("```", 2)[1]
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.rsplit("```", 1)[0].strip()
 
-    enriched_map = {e["index"]: e for e in json.loads(raw)}
+    return {e["index"]: e for e in json.loads(raw)}
+
+
+def translate_and_summarize(client: anthropic.Anthropic, items: list[dict], batch_size: int = 30) -> list[dict]:
+    """
+    Translate Arabic sermon metadata in batches to avoid hitting max_tokens.
+    Returns items enriched with: english_title, summary, topic_tag.
+    """
+    enriched_map = {}
+    for i in range(0, len(items), batch_size):
+        batch = items[i : i + batch_size]
+        enriched_map.update(_translate_batch(client, batch, offset=i))
 
     for i, item in enumerate(items):
         info = enriched_map.get(i, {})
@@ -647,7 +654,7 @@ def main():
         v["final_score"] = compute_score(v, max_views)
 
     all_videos.sort(key=lambda v: v["final_score"], reverse=True)
-    candidates = all_videos[: args.top * 4]   # oversample before topic filter
+    candidates = all_videos[: args.top * 2]   # oversample before topic filter
 
     # ── 3. Fetch & score series ────────────────────────────────────────────
     series_data: list[dict] = []
