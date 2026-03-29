@@ -218,7 +218,7 @@ def _translate_batch(client: anthropic.Anthropic, batch: list[dict], offset: int
     payload = [
         {
             "index":          offset + i,
-            "priest":         v["priest"],
+            "priest":         v.get("priest", ""),
             "title_ar":       v["title_ar"],
             "description_ar": v.get("description_ar", ""),
         }
