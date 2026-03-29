@@ -557,10 +557,10 @@ def generate_html(
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
-# Resolve paths relative to the *project root* (one level up from this file)
-_PROJECT_ROOT   = Path(__file__).parent.parent
-CREDENTIALS_FILE = _PROJECT_ROOT / "credentials.json"
-TOKEN_FILE       = _PROJECT_ROOT / "token.json"
+# Resolve paths relative to the folder this script lives in
+_SCRIPT_DIR      = Path(__file__).parent
+CREDENTIALS_FILE = _SCRIPT_DIR / "credentials.json"
+TOKEN_FILE       = _SCRIPT_DIR / "token.json"
 
 
 def _get_gmail_service():
