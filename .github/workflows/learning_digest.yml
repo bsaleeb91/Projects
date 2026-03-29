@@ -1,0 +1,41 @@
+name: Learning Digest
+
+on:
+  schedule:
+    - cron: '15 11 * * 1-5'  # 7:15 AM ET (EDT, UTC-4), weekdays only
+  workflow_dispatch:           # allows manual "Run workflow" button in GitHub UI
+
+permissions:
+  contents: read
+
+jobs:
+  run-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install anthropic google-auth google-auth-oauthlib google-api-python-client python-dotenv
+
+      - name: Write secrets to disk
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+          MY_EMAIL: ${{ secrets.MY_EMAIL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          echo "$GOOGLE_CREDENTIALS" > credentials.json
+          echo "$GOOGLE_TOKEN" > token.json
+          printf "MY_EMAIL=%s\nANTHROPIC_API_KEY=%s\nYOUTUBE_API_KEY=%s\n" \
+            "$MY_EMAIL" "$ANTHROPIC_API_KEY" "$YOUTUBE_API_KEY" > .env
+
+      - name: Run learning digest
+        run: python learning_digest.py
