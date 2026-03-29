@@ -19,7 +19,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 import anthropic
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
+# Try .env next to this script first, then fall back to local OneDrive path
+_script_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+_local_env  = r"C:\Users\17165\OneDrive\Documents\Claude\Personal\Agents\.env"
+
+if os.path.exists(_script_env):
+    load_dotenv(_script_env, override=True)
+elif os.path.exists(_local_env):
+    load_dotenv(_local_env, override=True)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MY_EMAIL          = os.getenv("MY_EMAIL", "bsaleeb@gmail.com")
