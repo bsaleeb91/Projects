@@ -54,6 +54,74 @@ PLAYLISTS_PER_PRIEST = 5    # Top playlists to inspect per priest
 DEFAULT_TOP_N        = 25
 REPORTS_DIR          = Path(__file__).parent / "reports"
 
+# ---------------------------------------------------------------------------
+# Content filters
+# ---------------------------------------------------------------------------
+MIN_DURATION_SECONDS = 25 * 60       # 25 minutes
+MAX_DURATION_SECONDS = 3 * 60 * 60   # 3 hours
+MIN_VIEWS            = 2_000
+MAX_AGE_DAYS         = 10 * 365       # 10 years
+
+# Arabic title keywords that indicate non-sermon content
+EXCLUDE_KEYWORDS = [
+    "مسلسل",      # drama
+    "أخبار",      # news
+    "لقاء",       # interview / talk show
+    "صلاة",       # prayer
+    "قداس",       # liturgy (general)
+    "كسر",        # fraction (Eucharistic)
+    "باسيليوس",   # St. Basil liturgy
+    "غريغوريوس",  # Gregorian liturgy
+    "إبصالية",    # psalmody
+    "ترتيبة",     # rite / hymn arrangement
+    "تسبحة",      # tasbeha (midnight praises)
+    "لحن",        # hymn / tune
+]
+
+# Arabic title keywords — at least one must appear for a video to qualify
+REQUIRE_KEYWORDS = ["عظة", "عظات", "تأمل", "خدمة", "محاضرة", "كلمة"]
+
+
+def _parse_duration(iso: str) -> int:
+    """Convert ISO 8601 duration (PT1H25M30S) to total seconds."""
+    import re
+    h = int(re.search(r"(\d+)H", iso).group(1)) if re.search(r"(\d+)H", iso) else 0
+    m = int(re.search(r"(\d+)M", iso).group(1)) if re.search(r"(\d+)M", iso) else 0
+    s = int(re.search(r"(\d+)S", iso).group(1)) if re.search(r"(\d+)S", iso) else 0
+    return h * 3600 + m * 60 + s
+
+
+def is_valid_sermon(video: dict) -> bool:
+    """Return True only if the video passes all content filters."""
+    title = video.get("title_ar", "")
+
+    # Must contain at least one sermon keyword
+    if not any(kw in title for kw in REQUIRE_KEYWORDS):
+        return False
+
+    # Must not contain any exclusion keyword
+    if any(kw in title for kw in EXCLUDE_KEYWORDS):
+        return False
+
+    # Duration check
+    duration = video.get("duration_seconds", 0)
+    if not (MIN_DURATION_SECONDS <= duration <= MAX_DURATION_SECONDS):
+        return False
+
+    # Minimum views
+    if video.get("views", 0) < MIN_VIEWS:
+        return False
+
+    # Published within last 10 years
+    try:
+        published = datetime.fromisoformat(video["published_at"].replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - published).days > MAX_AGE_DAYS:
+            return False
+    except Exception:
+        pass
+
+    return True
+
 
 # ---------------------------------------------------------------------------
 # YouTube: individual videos
@@ -78,25 +146,30 @@ def search_videos(youtube, priest: dict) -> list[dict]:
 
     stats_resp = youtube.videos().list(
         id=",".join(video_ids),
-        part="statistics,snippet",
+        part="statistics,snippet,contentDetails",
     ).execute()
 
     videos = []
     for item in stats_resp.get("items", []):
         stats   = item.get("statistics", {})
         snippet = item.get("snippet", {})
-        videos.append({
-            "video_id":       item["id"],
-            "priest":         priest["name"],
-            "priest_weight":  priest["weight"],
-            "title_ar":       snippet.get("title", ""),
-            "description_ar": snippet.get("description", "")[:600],
-            "published_at":   snippet.get("publishedAt", ""),
-            "views":          int(stats.get("viewCount", 0)),
-            "likes":          int(stats.get("likeCount", 0)),
-            "url":            f"https://youtube.com/watch?v={item['id']}",
-            "playlist_id":    None,
-        })
+        video = {
+            "video_id":         item["id"],
+            "priest":           priest["name"],
+            "priest_weight":    priest["weight"],
+            "title_ar":         snippet.get("title", ""),
+            "description_ar":   snippet.get("description", "")[:600],
+            "published_at":     snippet.get("publishedAt", ""),
+            "views":            int(stats.get("viewCount", 0)),
+            "likes":            int(stats.get("likeCount", 0)),
+            "url":              f"https://youtube.com/watch?v={item['id']}",
+            "playlist_id":      None,
+            "duration_seconds": _parse_duration(
+                item.get("contentDetails", {}).get("duration", "PT0S")
+            ),
+        }
+        if is_valid_sermon(video):
+            videos.append(video)
 
     return videos
 
@@ -150,25 +223,30 @@ def fetch_playlist_videos(youtube, playlist: dict) -> list[dict]:
 
     stats_resp = youtube.videos().list(
         id=",".join(video_ids),
-        part="statistics,snippet",
+        part="statistics,snippet,contentDetails",
     ).execute()
 
     videos = []
     for item in stats_resp.get("items", []):
         stats   = item.get("statistics", {})
         snippet = item.get("snippet", {})
-        videos.append({
-            "video_id":       item["id"],
-            "priest":         playlist["priest"],
-            "priest_weight":  playlist["priest_weight"],
-            "title_ar":       snippet.get("title", ""),
-            "description_ar": snippet.get("description", "")[:400],
-            "published_at":   snippet.get("publishedAt", ""),
-            "views":          int(stats.get("viewCount", 0)),
-            "likes":          int(stats.get("likeCount", 0)),
-            "url":            f"https://youtube.com/watch?v={item['id']}",
-            "playlist_id":    playlist["playlist_id"],
-        })
+        video = {
+            "video_id":         item["id"],
+            "priest":           playlist["priest"],
+            "priest_weight":    playlist["priest_weight"],
+            "title_ar":         snippet.get("title", ""),
+            "description_ar":   snippet.get("description", "")[:400],
+            "published_at":     snippet.get("publishedAt", ""),
+            "views":            int(stats.get("viewCount", 0)),
+            "likes":            int(stats.get("likeCount", 0)),
+            "url":              f"https://youtube.com/watch?v={item['id']}",
+            "playlist_id":      playlist["playlist_id"],
+            "duration_seconds": _parse_duration(
+                item.get("contentDetails", {}).get("duration", "PT0S")
+            ),
+        }
+        if is_valid_sermon(video):
+            videos.append(video)
 
     # Sort episodes by publish date (oldest first = Ep. 1 at top)
     videos.sort(key=lambda v: v["published_at"])
