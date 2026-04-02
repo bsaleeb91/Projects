@@ -5,10 +5,14 @@ PDF Commentary Agent
 Answers Bible commentary questions using ONLY the PDFs you provide.
 
 Usage:
-  python commentary_agent.py add path/to/commentary.pdf [another.pdf ...]
+  python commentary_agent.py sync <folder>   # index every PDF in a folder
   python commentary_agent.py ask "What does John 3:16 mean?"
   python commentary_agent.py list
   python commentary_agent.py remove <file_id>
+
+Tip: set a default folder once with --set-folder, then just run 'sync' with no arguments:
+  python commentary_agent.py sync ~/Commentaries --set-folder
+  python commentary_agent.py sync
 """
 
 import anthropic
@@ -32,7 +36,75 @@ def save_index(index: dict):
     INDEX_FILE.write_text(json.dumps(index, indent=2))
 
 
+def get_default_folder() -> Path | None:
+    index = load_index()
+    folder = index.get("_folder")
+    return Path(folder) if folder else None
+
+
+def set_default_folder(folder: Path):
+    index = load_index()
+    index["_folder"] = str(folder)
+    save_index(index)
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
+
+def cmd_sync(folder_str: str | None, set_folder: bool = False):
+    """Sync a folder: upload new PDFs, remove deleted ones from the index."""
+    if folder_str is None:
+        folder = get_default_folder()
+        if folder is None:
+            print("No folder set. Run: python commentary_agent.py sync <folder> --set-folder")
+            sys.exit(1)
+    else:
+        folder = Path(folder_str).expanduser().resolve()
+
+    if not folder.is_dir():
+        print(f"Not a directory: {folder}")
+        sys.exit(1)
+
+    if set_folder:
+        set_default_folder(folder)
+        print(f"Default folder saved: {folder}")
+
+    index = load_index()
+    # PDFs currently on disk (by resolved path string)
+    disk_pdfs = {str(p): p for p in folder.rglob("*.pdf")}
+
+    # Already-indexed paths
+    indexed_paths = {meta["original_path"]: fid for fid, meta in index.items() if not fid.startswith("_")}
+
+    # Upload new PDFs (on disk but not in index)
+    new_paths = set(disk_pdfs) - set(indexed_paths)
+    for path_str in sorted(new_paths):
+        p = disk_pdfs[path_str]
+        print(f"  + Uploading {p.name} ...", end=" ", flush=True)
+        with p.open("rb") as f:
+            uploaded = client.beta.files.upload(file=(p.name, f, "application/pdf"))
+        index[uploaded.id] = {"filename": p.name, "original_path": path_str}
+        save_index(index)
+        print(f"done  →  {uploaded.id}")
+
+    # Remove PDFs that were deleted from disk
+    removed_paths = set(indexed_paths) - set(disk_pdfs)
+    for path_str in removed_paths:
+        fid = indexed_paths[path_str]
+        name = index[fid]["filename"]
+        try:
+            client.beta.files.delete(fid)
+        except Exception:
+            pass
+        del index[fid]
+        save_index(index)
+        print(f"  - Removed {name} (no longer on disk)")
+
+    pdf_count = sum(1 for k in index if not k.startswith("_"))
+    if not new_paths and not removed_paths:
+        print(f"Already up to date. {pdf_count} PDF(s) indexed.")
+    else:
+        print(f"\n{pdf_count} PDF(s) now indexed.")
+
 
 def cmd_add(paths: list[str]):
     """Upload PDFs to the Files API and record their IDs."""
@@ -137,7 +209,18 @@ def main():
 
     command = sys.argv[1].lower()
 
-    if command == "add":
+    if command == "sync":
+        folder_arg = None
+        set_folder_flag = False
+        remaining = sys.argv[2:]
+        if "--set-folder" in remaining:
+            set_folder_flag = True
+            remaining = [a for a in remaining if a != "--set-folder"]
+        if remaining:
+            folder_arg = remaining[0]
+        cmd_sync(folder_arg, set_folder=set_folder_flag)
+
+    elif command == "add":
         if len(sys.argv) < 3:
             print("Usage: python commentary_agent.py add <file.pdf> [more.pdf ...]")
             sys.exit(1)
