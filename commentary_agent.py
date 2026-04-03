@@ -241,6 +241,23 @@ def cmd_remove(file_id: str):
     print(f"Removed '{name}' from index.")
 
 
+def get_search_keywords(question: str) -> list[str]:
+    """Extract verse references and key terms from the question."""
+    response = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=256,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Extract Bible verse references and key search terms from this question: \"{question}\"\n"
+                "Return ONLY a comma-separated list of short search strings to look for in PDF text.\n"
+                "Example: John 3:16, 3:16, John 3, For God so loved"
+            )
+        }]
+    )
+    return [k.strip() for k in response.content[0].text.strip().split(",")]
+
+
 def filter_pdfs_by_question(question: str, pdfs: dict) -> dict:
     """Use Claude to identify relevant PDFs based on the question."""
     filenames = "\n".join(f"- {meta['filename']}" for meta in pdfs.values())
@@ -252,10 +269,8 @@ def filter_pdfs_by_question(question: str, pdfs: dict) -> dict:
             "content": (
                 f"A user asked: \"{question}\"\n\n"
                 f"Here are the available commentary PDF filenames:\n{filenames}\n\n"
-                "List ONLY the filenames that are likely relevant to answering this question. "
-                "Return just the filenames, one per line, nothing else. "
-                "If the question is about a specific Bible book or passage, include commentaries on that book. "
-                "Include general commentaries that may cover it too."
+                "List ONLY the filenames most relevant to this question, one per line. "
+                "Return just filenames, nothing else."
             )
         }]
     )
@@ -265,47 +280,87 @@ def filter_pdfs_by_question(question: str, pdfs: dict) -> dict:
         if any(r.strip("- ").strip() in meta["filename"] or
                meta["filename"] in r for r in relevant_names)
     }
-    # Fall back to all PDFs if nothing matched
     return filtered if filtered else pdfs
 
 
+def extract_relevant_pages(pdf_bytes: bytes, keywords: list[str]) -> list[tuple[int, str]]:
+    """Return (page_num, text) for pages that mention any keyword."""
+    import pypdf
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    hits = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        if any(kw.lower() in text.lower() for kw in keywords):
+            hits.append((i + 1, text))
+    return hits
+
+
 def cmd_ask(question: str):
-    """Answer a question using only the indexed PDF commentaries."""
+    """Answer a question by extracting relevant pages from Drive PDFs."""
     index = load_index()
     pdfs = {k: v for k, v in index.items() if not k.startswith("_")}
     if not pdfs:
         print("No PDFs indexed. Run: python commentary_agent.py sync")
         return
 
+    # Step 1: filter to relevant PDFs by filename
     print(f"Finding relevant commentaries from {len(pdfs)} PDFs...", flush=True)
     relevant = filter_pdfs_by_question(question, pdfs)
-    print(f"Searching {len(relevant)} relevant PDF(s)...\n")
+    print(f"Scanning {len(relevant)} PDF(s) for matching pages...", flush=True)
 
-    doc_blocks = []
+    # Step 2: extract search keywords
+    keywords = get_search_keywords(question)
+
+    # Step 3: download each PDF from Drive and extract matching pages
+    credentials_path = index.get("_credentials")
+    token_path       = index.get("_token")
+    service = build_drive_service(credentials_path, token_path)
+
+    context_parts = []
+    char_budget = 400_000  # ~100K tokens
+
     for fid, meta in relevant.items():
-        doc_blocks.append({
-            "type": "document",
-            "source": {"type": "file", "file_id": fid},
-            "title": meta["filename"],
-            "citations": {"enabled": True},
-        })
-    doc_blocks.append({"type": "text", "text": question})
+        if sum(len(p) for p in context_parts) >= char_budget:
+            break
+        drive_id = meta.get("drive_id")
+        if not drive_id:
+            continue
+        print(f"  Reading {meta['filename']} ...", flush=True)
+        try:
+            pdf_bytes = download_drive_file(service, drive_id)
+            pages = extract_relevant_pages(pdf_bytes, keywords)
+            if pages:
+                sections = "\n\n".join(f"[Page {n}]\n{t}" for n, t in pages)
+                context_parts.append(f"=== {meta['filename']} ===\n{sections}")
+                print(f"    Found {len(pages)} relevant page(s).")
+            else:
+                print(f"    No matching pages found.")
+        except Exception as e:
+            print(f"    Skipped ({e})")
+
+    if not context_parts:
+        print("\nNo matching content found in your commentaries for that question.")
+        return
+
+    full_context = "\n\n".join(context_parts)
+    print(f"\nAnswering based on {len(context_parts)} source(s)...\n")
 
     system_prompt = (
         "You are a Bible commentary assistant. "
-        "You have been given a set of PDF commentary documents. "
-        "Answer the user's question using ONLY the information found in these documents. "
+        "Answer the user's question using ONLY the commentary text provided. "
         "Do not use any outside knowledge. "
-        "If a verse or topic is not covered in the provided documents, say so clearly. "
-        "When you cite information, mention which document it came from."
+        "If the topic is not covered in the provided text, say so clearly. "
+        "Cite which commentary and page number your answer comes from."
     )
 
-    with client.beta.messages.stream(
+    with client.messages.stream(
         model="claude-opus-4-6",
         max_tokens=4096,
         system=system_prompt,
-        messages=[{"role": "user", "content": doc_blocks}],
-        betas=["files-api-2025-04-14"],
+        messages=[{
+            "role": "user",
+            "content": f"Commentary excerpts:\n\n{full_context}\n\n---\n\nQuestion: {question}"
+        }],
     ) as stream:
         for text in stream.text_stream:
             print(text, end="", flush=True)
