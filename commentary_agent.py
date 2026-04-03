@@ -77,25 +77,39 @@ def build_drive_service(credentials_path: str, token_path: str):
 
 
 def list_drive_pdfs(service, folder_id: str) -> list[dict]:
-    """Return all PDFs in the given Drive folder (non-recursive)."""
-    results = []
-    page_token = None
-    query = (
-        f"'{folder_id}' in parents "
-        "and mimeType='application/pdf' "
-        "and trashed=false"
-    )
-    while True:
-        resp = service.files().list(
-            q=query,
-            fields="nextPageToken, files(id, name, md5Checksum)",
-            pageToken=page_token,
-        ).execute()
-        results.extend(resp.get("files", []))
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-    return results
+    """Return all PDFs in the given Drive folder, recursively through subfolders."""
+    pdfs = []
+
+    def _collect(fid: str):
+        page_token = None
+        # Find PDFs directly in this folder
+        while True:
+            resp = service.files().list(
+                q=f"'{fid}' in parents and mimeType='application/pdf' and trashed=false",
+                fields="nextPageToken, files(id, name, md5Checksum)",
+                pageToken=page_token,
+            ).execute()
+            pdfs.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        # Recurse into subfolders
+        page_token = None
+        while True:
+            resp = service.files().list(
+                q=f"'{fid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                fields="nextPageToken, files(id, name)",
+                pageToken=page_token,
+            ).execute()
+            for subfolder in resp.get("files", []):
+                print(f"    Scanning subfolder: {subfolder['name']} ...", flush=True)
+                _collect(subfolder["id"])
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+    _collect(folder_id)
+    return pdfs
 
 
 def download_drive_file(service, file_id: str) -> bytes:
