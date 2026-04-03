@@ -241,6 +241,34 @@ def cmd_remove(file_id: str):
     print(f"Removed '{name}' from index.")
 
 
+def filter_pdfs_by_question(question: str, pdfs: dict) -> dict:
+    """Use Claude to identify relevant PDFs based on the question."""
+    filenames = "\n".join(f"- {meta['filename']}" for meta in pdfs.values())
+    response = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1024,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"A user asked: \"{question}\"\n\n"
+                f"Here are the available commentary PDF filenames:\n{filenames}\n\n"
+                "List ONLY the filenames that are likely relevant to answering this question. "
+                "Return just the filenames, one per line, nothing else. "
+                "If the question is about a specific Bible book or passage, include commentaries on that book. "
+                "Include general commentaries that may cover it too."
+            )
+        }]
+    )
+    relevant_names = set(response.content[0].text.strip().splitlines())
+    filtered = {
+        fid: meta for fid, meta in pdfs.items()
+        if any(r.strip("- ").strip() in meta["filename"] or
+               meta["filename"] in r for r in relevant_names)
+    }
+    # Fall back to all PDFs if nothing matched
+    return filtered if filtered else pdfs
+
+
 def cmd_ask(question: str):
     """Answer a question using only the indexed PDF commentaries."""
     index = load_index()
@@ -249,10 +277,12 @@ def cmd_ask(question: str):
         print("No PDFs indexed. Run: python commentary_agent.py sync")
         return
 
-    print(f"Searching {len(pdfs)} PDF(s) for an answer...\n")
+    print(f"Finding relevant commentaries from {len(pdfs)} PDFs...", flush=True)
+    relevant = filter_pdfs_by_question(question, pdfs)
+    print(f"Searching {len(relevant)} relevant PDF(s)...\n")
 
     doc_blocks = []
-    for fid, meta in pdfs.items():
+    for fid, meta in relevant.items():
         doc_blocks.append({
             "type": "document",
             "source": {"type": "file", "file_id": fid},
