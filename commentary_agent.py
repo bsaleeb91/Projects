@@ -321,6 +321,25 @@ def main():
             sys.exit(1)
         cmd_ask(" ".join(args))
 
+    elif command == "debug":
+        index = load_index()
+        folder_id        = index.get("_folder_id")
+        credentials_path = index.get("_credentials")
+        token_path       = index.get("_token")
+        if not all([folder_id, credentials_path, token_path]):
+            print("Run sync --set-folder first.")
+            sys.exit(1)
+        service = build_drive_service(credentials_path, token_path)
+        print(f"Top-level contents of folder {folder_id}:\n")
+        resp = service.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="files(id, name, mimeType)",
+        ).execute()
+        for f in resp.get("files", []):
+            print(f"  [{f['mimeType']}]  {f['name']}")
+        if not resp.get("files"):
+            print("  (empty — no files or folders found)")
+
     elif command == "list":
         cmd_list()
 
