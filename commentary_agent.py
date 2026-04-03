@@ -5,17 +5,28 @@ PDF Commentary Agent
 Answers Bible commentary questions using ONLY the PDFs you provide.
 
 Usage:
-  python commentary_agent.py sync <folder>   # index every PDF in a folder
-  python commentary_agent.py ask "What does John 3:16 mean?"
-  python commentary_agent.py list
-  python commentary_agent.py remove <file_id>
+  # First-time setup — point at your Google Drive folder:
+  python commentary_agent.py sync <drive-folder-id> --set-folder \
+      --credentials "C:\\Users\\17165\\OneDrive\\...\\credentials.json" \
+      --token "C:\\Users\\17165\\OneDrive\\...\\token.json"
 
-Tip: set a default folder once with --set-folder, then just run 'sync' with no arguments:
-  python commentary_agent.py sync ~/Commentaries --set-folder
+  # After setup, just drop PDFs in the Drive folder and run:
   python commentary_agent.py sync
+
+  # Ask questions:
+  python commentary_agent.py ask "What does John 3:16 mean?"
+
+  # Manage:
+  python commentary_agent.py list
+  python commentary_agent.py remove <anthropic-file-id>
+
+How to find your Drive folder ID:
+  Open the folder in Google Drive — the ID is the last part of the URL:
+  https://drive.google.com/drive/folders/<FOLDER-ID-IS-HERE>
 """
 
 import anthropic
+import io
 import json
 import sys
 from pathlib import Path
@@ -36,121 +47,171 @@ def save_index(index: dict):
     INDEX_FILE.write_text(json.dumps(index, indent=2))
 
 
-def get_default_folder() -> Path | None:
-    index = load_index()
-    folder = index.get("_folder")
-    return Path(folder) if folder else None
+# ── Google Drive helpers ──────────────────────────────────────────────────────
+
+def build_drive_service(credentials_path: str, token_path: str):
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+
+    creds = Credentials.from_authorized_user_file(
+        token_path,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        # Save refreshed token back
+        Path(token_path).write_text(creds.to_json())
+
+    return build("drive", "v3", credentials=creds)
 
 
-def set_default_folder(folder: Path):
-    index = load_index()
-    index["_folder"] = str(folder)
-    save_index(index)
+def list_drive_pdfs(service, folder_id: str) -> list[dict]:
+    """Return all PDFs in the given Drive folder (non-recursive)."""
+    results = []
+    page_token = None
+    query = (
+        f"'{folder_id}' in parents "
+        "and mimeType='application/pdf' "
+        "and trashed=false"
+    )
+    while True:
+        resp = service.files().list(
+            q=query,
+            fields="nextPageToken, files(id, name, md5Checksum)",
+            pageToken=page_token,
+        ).execute()
+        results.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return results
+
+
+def download_drive_file(service, file_id: str) -> bytes:
+    from googleapiclient.http import MediaIoBaseDownload
+
+    request = service.files().get_media(fileId=file_id)
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buf.getvalue()
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-def cmd_sync(folder_str: str | None, set_folder: bool = False):
-    """Sync a folder: upload new PDFs, remove deleted ones from the index."""
-    if folder_str is None:
-        folder = get_default_folder()
-        if folder is None:
-            print("No folder set. Run: python commentary_agent.py sync <folder> --set-folder")
-            sys.exit(1)
-    else:
-        folder = Path(folder_str).expanduser().resolve()
+def cmd_sync(folder_id: str | None, set_folder: bool = False,
+             credentials_path: str | None = None, token_path: str | None = None):
+    """Sync from Google Drive: upload new PDFs, remove deleted ones."""
+    index = load_index()
 
-    if not folder.is_dir():
-        print(f"Not a directory: {folder}")
+    # Persist / recall configuration
+    if set_folder:
+        if not folder_id:
+            print("Provide a folder ID when using --set-folder.")
+            sys.exit(1)
+        if not credentials_path or not token_path:
+            print("Provide --credentials and --token when using --set-folder.")
+            sys.exit(1)
+        index["_folder_id"]    = folder_id
+        index["_credentials"]  = credentials_path
+        index["_token"]        = token_path
+        save_index(index)
+        print(f"Configuration saved.")
+        print(f"  Drive folder : {folder_id}")
+        print(f"  Credentials  : {credentials_path}")
+        print(f"  Token        : {token_path}\n")
+    else:
+        folder_id        = folder_id        or index.get("_folder_id")
+        credentials_path = credentials_path or index.get("_credentials")
+        token_path       = token_path       or index.get("_token")
+
+    if not all([folder_id, credentials_path, token_path]):
+        print(
+            "Missing configuration. Run once with --set-folder to save your settings:\n"
+            "  python commentary_agent.py sync <folder-id> --set-folder \\\n"
+            '      --credentials "C:\\path\\to\\credentials.json" \\\n'
+            '      --token "C:\\path\\to\\token.json"'
+        )
         sys.exit(1)
 
-    if set_folder:
-        set_default_folder(folder)
-        print(f"Default folder saved: {folder}")
+    print("Connecting to Google Drive...", flush=True)
+    service = build_drive_service(credentials_path, token_path)
 
-    index = load_index()
-    # PDFs currently on disk (by resolved path string)
-    disk_pdfs = {str(p): p for p in folder.rglob("*.pdf")}
+    drive_files = list_drive_pdfs(service, folder_id)
+    drive_by_id = {f["id"]: f for f in drive_files}
 
-    # Already-indexed paths
-    indexed_paths = {meta["original_path"]: fid for fid, meta in index.items() if not fid.startswith("_")}
+    # Already indexed Drive files: drive_id → anthropic_file_id
+    indexed = {
+        meta["drive_id"]: aid
+        for aid, meta in index.items()
+        if not aid.startswith("_") and "drive_id" in meta
+    }
 
-    # Upload new PDFs (on disk but not in index)
-    new_paths = set(disk_pdfs) - set(indexed_paths)
-    for path_str in sorted(new_paths):
-        p = disk_pdfs[path_str]
-        print(f"  + Uploading {p.name} ...", end=" ", flush=True)
-        with p.open("rb") as f:
-            uploaded = client.beta.files.upload(file=(p.name, f, "application/pdf"))
-        index[uploaded.id] = {"filename": p.name, "original_path": path_str}
+    # Upload new files
+    new_ids = set(drive_by_id) - set(indexed)
+    for drive_id in sorted(new_ids, key=lambda i: drive_by_id[i]["name"]):
+        name = drive_by_id[drive_id]["name"]
+        print(f"  + Downloading {name} ...", end=" ", flush=True)
+        pdf_bytes = download_drive_file(service, drive_id)
+        print("uploading ...", end=" ", flush=True)
+        uploaded = client.beta.files.upload(
+            file=(name, io.BytesIO(pdf_bytes), "application/pdf")
+        )
+        index[uploaded.id] = {
+            "filename": name,
+            "drive_id": drive_id,
+            "md5": drive_by_id[drive_id].get("md5Checksum", ""),
+        }
         save_index(index)
         print(f"done  →  {uploaded.id}")
 
-    # Remove PDFs that were deleted from disk
-    removed_paths = set(indexed_paths) - set(disk_pdfs)
-    for path_str in removed_paths:
-        fid = indexed_paths[path_str]
-        name = index[fid]["filename"]
+    # Remove files deleted from Drive
+    removed_ids = set(indexed) - set(drive_by_id)
+    for drive_id in removed_ids:
+        aid  = indexed[drive_id]
+        name = index[aid]["filename"]
         try:
-            client.beta.files.delete(fid)
+            client.beta.files.delete(aid)
         except Exception:
             pass
-        del index[fid]
+        del index[aid]
         save_index(index)
-        print(f"  - Removed {name} (no longer on disk)")
+        print(f"  - Removed {name} (deleted from Drive)")
 
     pdf_count = sum(1 for k in index if not k.startswith("_"))
-    if not new_paths and not removed_paths:
+    if not new_ids and not removed_ids:
         print(f"Already up to date. {pdf_count} PDF(s) indexed.")
     else:
         print(f"\n{pdf_count} PDF(s) now indexed.")
 
 
-def cmd_add(paths: list[str]):
-    """Upload PDFs to the Files API and record their IDs."""
-    index = load_index()
-    for path_str in paths:
-        p = Path(path_str).expanduser().resolve()
-        if not p.exists():
-            print(f"  [skip] File not found: {p}")
-            continue
-        if p.suffix.lower() != ".pdf":
-            print(f"  [skip] Not a PDF: {p.name}")
-            continue
-        print(f"  Uploading {p.name} ...", end=" ", flush=True)
-        with p.open("rb") as f:
-            uploaded = client.beta.files.upload(
-                file=(p.name, f, "application/pdf"),
-            )
-        index[uploaded.id] = {"filename": p.name, "original_path": str(p)}
-        save_index(index)
-        print(f"done  →  {uploaded.id}")
-    print(f"\n{len(index)} PDF(s) in index.")
-
-
 def cmd_list():
     """Show all uploaded commentaries."""
     index = load_index()
-    if not index:
-        print("No PDFs indexed. Use: python commentary_agent.py add <file.pdf>")
+    pdfs = {k: v for k, v in index.items() if not k.startswith("_")}
+    if not pdfs:
+        print("No PDFs indexed. Run: python commentary_agent.py sync")
         return
-    print(f"{'File ID':<40}  Filename")
-    print("-" * 65)
-    for fid, meta in index.items():
+    print(f"{'Anthropic File ID':<40}  Filename")
+    print("-" * 70)
+    for fid, meta in pdfs.items():
         print(f"{fid:<40}  {meta['filename']}")
 
 
 def cmd_remove(file_id: str):
-    """Delete a file from the Files API and remove it from the index."""
+    """Delete a file from the Anthropic Files API and remove it from the index."""
     index = load_index()
     if file_id not in index:
         print(f"ID not found in local index: {file_id}")
         return
     try:
         client.beta.files.delete(file_id)
-        print(f"Deleted from Files API: {file_id}")
+        print(f"Deleted from Anthropic Files API: {file_id}")
     except Exception as e:
-        print(f"Warning – could not delete from API ({e}); removing from local index anyway.")
+        print(f"Warning – could not delete from API ({e}); removing from index anyway.")
     name = index.pop(file_id)["filename"]
     save_index(index)
     print(f"Removed '{name}' from index.")
@@ -159,23 +220,21 @@ def cmd_remove(file_id: str):
 def cmd_ask(question: str):
     """Answer a question using only the indexed PDF commentaries."""
     index = load_index()
-    if not index:
-        print("No PDFs indexed. Add some first:\n  python commentary_agent.py add <file.pdf>")
+    pdfs = {k: v for k, v in index.items() if not k.startswith("_")}
+    if not pdfs:
+        print("No PDFs indexed. Run: python commentary_agent.py sync")
         return
 
-    print(f"Searching {len(index)} PDF(s) for an answer...\n")
+    print(f"Searching {len(pdfs)} PDF(s) for an answer...\n")
 
-    # Build the document blocks — one per PDF
     doc_blocks = []
-    for fid, meta in index.items():
+    for fid, meta in pdfs.items():
         doc_blocks.append({
             "type": "document",
             "source": {"type": "file", "file_id": fid},
             "title": meta["filename"],
             "citations": {"enabled": True},
         })
-
-    # Add the user question last
     doc_blocks.append({"type": "text", "text": question})
 
     system_prompt = (
@@ -197,10 +256,21 @@ def cmd_ask(question: str):
         for text in stream.text_stream:
             print(text, end="", flush=True)
 
-    print()  # newline after streamed response
+    print()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
+def parse_flag(args: list[str], flag: str) -> tuple[str | None, list[str]]:
+    """Extract --flag value from args, return (value, remaining_args)."""
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args):
+            value = args[i + 1]
+            remaining = args[:i] + args[i + 2:]
+            return value, remaining
+    return None, args
+
 
 def main():
     if len(sys.argv) < 2:
@@ -208,38 +278,33 @@ def main():
         sys.exit(1)
 
     command = sys.argv[1].lower()
+    args = sys.argv[2:]
 
     if command == "sync":
-        folder_arg = None
-        set_folder_flag = False
-        remaining = sys.argv[2:]
-        if "--set-folder" in remaining:
-            set_folder_flag = True
-            remaining = [a for a in remaining if a != "--set-folder"]
-        if remaining:
-            folder_arg = remaining[0]
-        cmd_sync(folder_arg, set_folder=set_folder_flag)
+        set_folder = "--set-folder" in args
+        args = [a for a in args if a != "--set-folder"]
 
-    elif command == "add":
-        if len(sys.argv) < 3:
-            print("Usage: python commentary_agent.py add <file.pdf> [more.pdf ...]")
-            sys.exit(1)
-        cmd_add(sys.argv[2:])
+        credentials, args = parse_flag(args, "--credentials")
+        token, args       = parse_flag(args, "--token")
+        folder_id         = args[0] if args else None
+
+        cmd_sync(folder_id, set_folder=set_folder,
+                 credentials_path=credentials, token_path=token)
 
     elif command == "ask":
-        if len(sys.argv) < 3:
+        if not args:
             print('Usage: python commentary_agent.py ask "Your question here"')
             sys.exit(1)
-        cmd_ask(" ".join(sys.argv[2:]))
+        cmd_ask(" ".join(args))
 
     elif command == "list":
         cmd_list()
 
     elif command == "remove":
-        if len(sys.argv) < 3:
+        if not args:
             print("Usage: python commentary_agent.py remove <file_id>")
             sys.exit(1)
-        cmd_remove(sys.argv[2])
+        cmd_remove(args[0])
 
     else:
         print(f"Unknown command: {command}")
