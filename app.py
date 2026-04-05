@@ -209,13 +209,13 @@ def search_one_source(
     question: str,
     source: str | None,
     status,
-) -> str:
-    """Select relevant files, run FTS, return formatted context."""
+) -> tuple[str, list[sqlite3.Row]]:
+    """Select relevant files, run FTS, return (formatted context, raw rows)."""
     filenames = get_filenames(conn, source)
     selected, keywords = select_files_and_keywords(client, question, filenames)
     status.write(f"Files: {', '.join(selected) or 'all'} | Keywords: {', '.join(keywords)}")
     rows = fts_search(conn, keywords, source, selected or None)
-    return format_context(rows)
+    return format_context(rows), rows
 
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
@@ -252,15 +252,17 @@ if question := st.chat_input("Ask a question about the Bible..."):
         st.markdown(question)
 
     with st.status("Searching commentaries...", expanded=False) as status:
+        all_rows: list[sqlite3.Row] = []
         if mode == "Compare Both":
-            tadros_context = search_one_source(client, conn, question, "Fr. Tadros Malaty", status)
-            acc_context = search_one_source(client, conn, question, "Ancient Christian Commentary", status)
+            tadros_context, tadros_rows = search_one_source(client, conn, question, "Fr. Tadros Malaty", status)
+            acc_context, acc_rows = search_one_source(client, conn, question, "Ancient Christian Commentary", status)
             tadros_block = "=== Fr. Tadros Malaty ===\n\n" + (tadros_context or "(No matching excerpts found.)")
             acc_block = "=== Ancient Christian Commentary ===\n\n" + (acc_context or "(No matching excerpts found.)")
             context = tadros_block + "\n\n" + acc_block
+            all_rows = tadros_rows + acc_rows
         else:
             source_filter = None if mode == "All" else mode
-            context = search_one_source(client, conn, question, source_filter, status)
+            context, all_rows = search_one_source(client, conn, question, source_filter, status)
 
         if not context:
             status.update(label="No matching excerpts found.", state="error")
@@ -287,3 +289,15 @@ if question := st.chat_input("Ask a question about the Bible..."):
 
         if len(st.session_state.messages) > MAX_HISTORY * 2:
             st.session_state.messages = st.session_state.messages[-(MAX_HISTORY * 2):]
+
+        # Show retrieved excerpts so the user can verify the answer
+        with st.expander("Sources used", expanded=False):
+            if all_rows:
+                for row in all_rows:
+                    st.markdown(
+                        f"**{row['source']} — {row['filename']}, page {row['page_number']}**"
+                    )
+                    st.caption(row["chunk_text"])
+                    st.divider()
+            else:
+                st.write("No excerpts retrieved.")

@@ -40,6 +40,17 @@ INDEX_FILE = Path(__file__).parent / "commentary_index.json"
 
 CHUNK_SIZE = 500  # words per chunk
 
+# Files that are not actual commentary — skip during indexing
+BLACKLIST = {
+    "ACCS INTRODUCTION AND BIBLIOGRAPHIC INFORMATION.pdf",
+    "MELTHO... Syriac OpenType Fonts for Windows XP.pdf",
+    "The Apocrypha ... King James Version.pdf",
+    "1470-G.pdf",
+    "1470-I.pdf",
+    "000 Map_of_the_Old_Testament.pdf",
+    "000 Search_Scriptures.pdf",
+}
+
 
 def build_drive_service_from_env():
     """Build Drive service from env vars (Render/CI) or fall back to local files."""
@@ -248,6 +259,11 @@ def main():
     for i, pdf_file in enumerate(all_pdfs):
         name = pdf_file["name"]
         source = detect_source(pdf_file.get("_path", ""), name)
+
+        if name in BLACKLIST:
+            print(f"[{i+1}/{len(all_pdfs)}] Skipping (blacklisted): {name}")
+            skipped += 1
+            continue
 
         if already_indexed(conn, name):
             skipped += 1
