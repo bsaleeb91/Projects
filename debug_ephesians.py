@@ -17,7 +17,7 @@ results = svc.files().list(
 ).execute()
 print("Found:", results["files"])
 
-f = results["files"][0]
+f = next(r for r in results["files"] if r["name"] == "049 Ephesians.pdf")
 print("Downloading:", f["name"])
 buf = io.BytesIO()
 dl = MediaIoBaseDownload(buf, svc.files().get_media(fileId=f["id"]))
