@@ -42,6 +42,15 @@ SCOPES                = ["https://www.googleapis.com/auth/gmail.send"]
 MAX_DIGEST_SECONDS    = 30 * 60   # 30-minute reading budget
 MIN_CLAUDE_SCORE      = 6.0       # drop anything below this
 YOUTUBE_LOOKBACK_DAYS = 7
+MAX_PER_SOURCE        = 2         # max articles per domain per digest
+
+# Domains that are largely paywalled — label but don't drop so Claude can still rank
+PAYWALL_DOMAINS = {
+    "www.statnews.com",
+    "www.healthaffairs.org",
+    "hbr.org",
+    "www.technologyreview.com",
+}
 
 # ── RSS Sources (reputable, curated allowlist) ────────────────────────────────
 RSS_SOURCES = [
@@ -51,6 +60,7 @@ RSS_SOURCES = [
     ("https://www.fiercepharma.com/rss/xml",             "Specialty Pharmacy"),
     ("https://www.healthaffairs.org/rss/site_5/41.xml",  "Health Policy"),
     ("https://kff.org/feed/",                            "Health Policy"),
+    ("https://www.managedhealthcareexecutive.com/rss",   "Specialty Pharmacy"),
     # AI & Data
     ("https://www.technologyreview.com/feed/",           "AI & Data"),
     ("https://news.ycombinator.com/rss",                 "AI & Data"),
@@ -135,6 +145,9 @@ def fetch_rss_articles(lookback_hours=24):
             root = ET.fromstring(content)
             ns   = {"a": "http://www.w3.org/2005/Atom"}
 
+            domain  = feed_url.split("/")[2]
+            paywall = domain in PAYWALL_DOMAINS
+
             # RSS 2.0 items
             for item in root.findall(".//item"):
                 pub_dt = _parse_date(item.findtext("pubDate", ""))
@@ -149,11 +162,12 @@ def fetch_rss_articles(lookback_hours=24):
                     "type":      "article",
                     "title":     title,
                     "url":       link,
-                    "source":    feed_url.split("/")[2],
+                    "source":    domain,
                     "topic":     topic,
                     "summary":   _strip_html(desc)[:400],
                     "read_sec":  _read_sec(desc),
                     "published": pub_dt.strftime("%b %-d") if pub_dt else "",
+                    "paywall":   paywall,
                     "score":     0,
                     "why":       "",
                 })
@@ -173,11 +187,12 @@ def fetch_rss_articles(lookback_hours=24):
                     "type":      "article",
                     "title":     title,
                     "url":       link,
-                    "source":    feed_url.split("/")[2],
+                    "source":    domain,
                     "topic":     topic,
                     "summary":   _strip_html(summary)[:400],
                     "read_sec":  _read_sec(summary),
                     "published": pub_dt.strftime("%b %-d") if pub_dt else "",
+                    "paywall":   paywall,
                     "score":     0,
                     "why":       "",
                 })
@@ -185,7 +200,15 @@ def fetch_rss_articles(lookback_hours=24):
         except Exception as e:
             print(f"  RSS error ({feed_url.split('/')[2]}): {e}")
 
-    return articles
+    # Cap at MAX_PER_SOURCE articles per domain to prevent any one source dominating
+    from collections import defaultdict
+    source_counts = defaultdict(int)
+    capped = []
+    for a in articles:
+        if source_counts[a["source"]] < MAX_PER_SOURCE:
+            capped.append(a)
+            source_counts[a["source"]] += 1
+    return capped
 
 
 # ── YouTube Fetching ──────────────────────────────────────────────────────────
@@ -271,17 +294,18 @@ def fetch_youtube_videos():
                     pub_label = pub_raw[:10]
 
                 videos.append({
-                    "type":         "video",
-                    "title":        snippet.get("title", ""),
-                    "url":          f"https://youtube.com/watch?v={item['id']}",
-                    "source":       snippet.get("channelTitle", ""),
-                    "topic":        "YouTube",
-                    "summary":      snippet.get("description", "")[:300],
-                    "read_sec":     duration,
+                    "type":          "video",
+                    "title":         snippet.get("title", ""),
+                    "url":           f"https://youtube.com/watch?v={item['id']}",
+                    "source":        snippet.get("channelTitle", ""),
+                    "topic":         "YouTube",
+                    "summary":       snippet.get("description", "")[:300],
+                    "read_sec":      duration,
                     "view_velocity": view_vel,
-                    "published":    pub_label,
-                    "score":        0,
-                    "why":          "",
+                    "published":     pub_label,
+                    "paywall":       False,
+                    "score":         0,
+                    "why":           "",
                 })
         except Exception as e:
             print(f"  YouTube details error: {e}")
@@ -318,18 +342,18 @@ About Bishoy:
   PBM reform, biosimilars, AI/LLM/agents, healthcare data analytics, Power BI, Python, SQL,
   independent consulting strategy, thought leadership, healthcare policy
 
-Score each item 1–10:
-  10   = must-read for his specific role — direct impact on his work or business
-  7–9  = genuinely relevant and useful
-  5–6  = mildly interesting, not essential
-  1–4  = off-topic, generic, or low-signal
+Score each item 1-10:
+  10   = must-read for his specific role - direct impact on his work or business
+  7-9  = genuinely relevant and useful
+  5-6  = mildly interesting, not essential
+  1-4  = off-topic, generic, or low-signal
 
 Rules:
 - Write a tight 1-sentence "why this matters to Bishoy" for anything scored 7+.
 - Omit items scored below {MIN_CLAUDE_SCORE} entirely.
 - For YouTube videos, weight channel authority and view velocity heavily.
 - Prefer primary sources and expert analysis over aggregator summaries.
-- Return ONLY a valid JSON array — no markdown, no commentary:
+- Return ONLY a valid JSON array - no markdown, no commentary:
 
 [{{"id": 0, "score": 8.5, "why": "..."}}, ...]
 
@@ -382,19 +406,25 @@ def build_html(in_budget, overflow, total_sec, today_str):
     H = "border-left:4px solid #1a2744; padding-left:12px; margin:24px 0 10px; font-size:15px; font-weight:700; color:#1a2744;"
 
     def row(item):
-        score  = item["score"]
-        color  = "#1b6b3a" if score >= 8.5 else "#1d4e7a" if score >= 7 else "#777"
-        source = item.get("source", "")
-        pub    = item.get("published", "")
-        meta   = " · ".join(x for x in [source, pub, item["topic"]] if x)
-        why    = item.get("why", "")
+        score   = item["score"]
+        color   = "#1b6b3a" if score >= 8.5 else "#1d4e7a" if score >= 7 else "#777"
+        source  = item.get("source", "")
+        pub     = item.get("published", "")
+        paywall = item.get("paywall", False)
+        meta    = " · ".join(x for x in [source, pub, item["topic"]] if x)
+        why     = item.get("why", "")
+        paywall_tag = (
+            ' <span style="font-size:10px; background:#fff3cd; color:#856404; '
+            'border-radius:3px; padding:1px 5px; font-weight:600;">$ paywall</span>'
+            if paywall else ""
+        )
         return (
             f'<tr><td style="padding:10px 0; border-bottom:1px solid #f0f0f0; vertical-align:top;">'
             f'<div style="display:flex; justify-content:space-between;">'
             f'<span style="font-size:11px; font-weight:700; color:{color};">▲ {score:.1f}</span>'
             f'<span style="font-size:11px; color:#aaa;">{_fmt(item["read_sec"])}</span></div>'
-            f'<a href="{item["url"]}" style="font-size:14px; font-weight:600; color:#1a2744; text-decoration:none; display:block; margin:4px 0;">{item["title"]}</a>'
-            f'<div style="font-size:11px; color:#999; margin-bottom:3px;">{meta}</div>'
+            f'<a href="{item["url"]}" style="font-size:14px; font-weight:600; color:#1a2744; text-decoration:none; display:block; margin:4px 0;">{item["title"]}</a>{paywall_tag}'
+            f'<div style="font-size:11px; color:#999; margin-bottom:3px; margin-top:3px;">{meta}</div>'
             + (f'<div style="font-size:12px; color:#555; font-style:italic;">{why}</div>' if why else "")
             + "</td></tr>"
         )
@@ -422,12 +452,12 @@ def build_html(in_budget, overflow, total_sec, today_str):
 <body style="margin:0; padding:16px; background:#f5f5f5; font-family:Arial,sans-serif;">
 <div style="max-width:600px; margin:0 auto; background:#fff; border-radius:8px; padding:24px;">
   <div style="border-bottom:2px solid #1a2744; padding-bottom:12px; margin-bottom:4px;">
-    <div style="font-size:20px; font-weight:700; color:#1a2744;">📚 Learning Digest</div>
-    <div style="font-size:13px; color:#999; margin-top:4px;">{today_str} · ⏱ {_fmt(total_sec)} curated reading</div>
+    <div style="font-size:20px; font-weight:700; color:#1a2744;">&#128218; Learning Digest</div>
+    <div style="font-size:13px; color:#999; margin-top:4px;">{today_str} · &#9201; {_fmt(total_sec)} curated reading</div>
   </div>
 
-  {section("📰 Articles &amp; News", articles, "No articles found today.")}
-  {section("▶ Videos", videos, "No videos found this week.")}
+  {section("&#128240; Articles &amp; News", articles, "No articles found today.")}
+  {section("&#9654; Videos", videos, "No videos found this week.")}
 
   {overflow_html}
 
@@ -442,7 +472,7 @@ def build_html(in_budget, overflow, total_sec, today_str):
 # ── Send Email ────────────────────────────────────────────────────────────────
 def send_email(gmail_service, html_body, today_str):
     msg            = MIMEMultipart("alternative")
-    msg["Subject"] = f"📚 Learning Digest — {today_str}"
+    msg["Subject"] = f"Learning Digest - {today_str}"
     msg["From"]    = MY_EMAIL
     msg["To"]      = MY_EMAIL
     msg.attach(MIMEText(html_body, "html"))
@@ -474,7 +504,7 @@ def main():
 
     print(f"🤖 Ranking {len(candidates)} items with Claude...")
     ranked = rank_with_claude(candidates)
-    print(f"   {len(ranked)} passed quality threshold (score ≥ {MIN_CLAUDE_SCORE})")
+    print(f"   {len(ranked)} passed quality threshold (score >= {MIN_CLAUDE_SCORE})")
 
     in_budget, overflow, total_sec = apply_budget(ranked)
     print(f"   {len(in_budget)} items fit 30-min budget ({_fmt(total_sec)})")
