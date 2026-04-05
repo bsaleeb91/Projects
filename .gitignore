@@ -1,8 +1,9 @@
 # Secrets — never commit these
 credentials.json
 token.json
+drive_token.json
 .env
-*.txt
+
 
 # Python
 __pycache__/
