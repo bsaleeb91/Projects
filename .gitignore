@@ -1,8 +1,11 @@
 # Secrets — never commit these
 credentials.json
 token.json
+drive_token.json
 .env
-*.txt
+
+# SQLite database (built at deploy time)
+commentary.db
 
 # Python
 __pycache__/
