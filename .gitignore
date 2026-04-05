@@ -4,8 +4,6 @@ token.json
 drive_token.json
 .env
 
-# SQLite database (built at deploy time)
-commentary.db
 
 # Python
 __pycache__/
