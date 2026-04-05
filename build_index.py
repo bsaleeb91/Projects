@@ -210,7 +210,10 @@ def index_pdf(conn: sqlite3.Connection, pdf_bytes: bytes, filename: str, source:
 
     rows = []
     for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            continue  # skip corrupted page, keep going
         text = text.strip()
         if not text:
             continue
