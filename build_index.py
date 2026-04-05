@@ -200,20 +200,20 @@ def already_indexed(conn: sqlite3.Connection, filename: str) -> bool:
 
 def index_pdf(conn: sqlite3.Connection, pdf_bytes: bytes, filename: str, source: str):
     """Extract pages, chunk, and insert into DB."""
-    import pypdf
+    import fitz  # pymupdf
 
     try:
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
         print(f"    Could not read PDF: {e}")
         return 0
 
     rows = []
-    for i, page in enumerate(reader.pages):
+    for i, page in enumerate(doc):
         try:
-            text = page.extract_text() or ""
+            text = page.get_text() or ""
         except Exception:
-            continue  # skip corrupted page, keep going
+            continue  # skip unreadable page, keep going
         text = text.strip()
         if not text:
             continue
