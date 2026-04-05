@@ -44,7 +44,7 @@ MIN_CLAUDE_SCORE      = 6.0       # drop anything below this
 YOUTUBE_LOOKBACK_DAYS = 7
 MAX_PER_SOURCE        = 2         # max articles per domain per digest
 
-# Domains that are largely paywalled — label but don't drop so Claude can still rank
+# Domains that are largely paywalled — label so you know before clicking
 PAYWALL_DOMAINS = {
     "www.statnews.com",
     "www.healthaffairs.org",
@@ -52,21 +52,22 @@ PAYWALL_DOMAINS = {
     "www.technologyreview.com",
 }
 
-# ── RSS Sources (reputable, curated allowlist) ────────────────────────────────
+# ── RSS Sources (free sources first, paywalled at bottom) ─────────────────────
 RSS_SOURCES = [
-    # Specialty Pharmacy & Health Policy
-    ("http://www.drugchannels.net/feeds/posts/default",  "Specialty Pharmacy"),
-    ("https://www.statnews.com/feed/",                   "Specialty Pharmacy"),
-    ("https://www.fiercepharma.com/rss/xml",             "Specialty Pharmacy"),
-    ("https://www.healthaffairs.org/rss/site_5/41.xml",  "Health Policy"),
-    ("https://kff.org/feed/",                            "Health Policy"),
-    ("https://www.managedhealthcareexecutive.com/rss",   "Specialty Pharmacy"),
-    # AI & Data
-    ("https://www.technologyreview.com/feed/",           "AI & Data"),
-    ("https://news.ycombinator.com/rss",                 "AI & Data"),
-    ("https://www.anthropic.com/news/rss.xml",           "AI & Data"),
-    # Consulting & Business Strategy
-    ("https://hbr.org/subscriberservices/rss-feed",      "Consulting"),
+    # Specialty Pharmacy & Health Policy — FREE
+    ("http://www.drugchannels.net/feeds/posts/default",       "Specialty Pharmacy"),
+    ("https://www.fiercepharma.com/rss/xml",                  "Specialty Pharmacy"),
+    ("https://www.fiercehealthcare.com/rss/xml",              "Healthcare"),
+    ("https://www.fiercebiotech.com/rss/xml",                 "Biotech"),
+    ("https://www.managedhealthcareexecutive.com/rss",        "Specialty Pharmacy"),
+    ("https://kff.org/feed/",                                 "Health Policy"),
+    ("https://www.anthropic.com/news/rss.xml",                "AI & Data"),
+    ("https://news.ycombinator.com/rss",                      "AI & Data"),
+    # Paywalled — included but flagged
+    ("https://www.statnews.com/feed/",                        "Specialty Pharmacy"),
+    ("https://www.healthaffairs.org/rss/site_5/41.xml",       "Health Policy"),
+    ("https://hbr.org/subscriberservices/rss-feed",           "Consulting"),
+    ("https://www.technologyreview.com/feed/",                "AI & Data"),
 ]
 
 # ── YouTube Search Queries ────────────────────────────────────────────────────
@@ -279,7 +280,7 @@ def fetch_youtube_videos():
                 stats    = item.get("statistics", {})
                 duration = _parse_duration(details.get("duration", ""))
 
-                # Filter: 8 min – 90 min
+                # Filter: 8 min - 90 min
                 if not (8 * 60 <= duration <= 90 * 60):
                     continue
 
@@ -421,7 +422,7 @@ def build_html(in_budget, overflow, total_sec, today_str):
         return (
             f'<tr><td style="padding:10px 0; border-bottom:1px solid #f0f0f0; vertical-align:top;">'
             f'<div style="display:flex; justify-content:space-between;">'
-            f'<span style="font-size:11px; font-weight:700; color:{color};">▲ {score:.1f}</span>'
+            f'<span style="font-size:11px; font-weight:700; color:{color};">&#9650; {score:.1f}</span>'
             f'<span style="font-size:11px; color:#aaa;">{_fmt(item["read_sec"])}</span></div>'
             f'<a href="{item["url"]}" style="font-size:14px; font-weight:600; color:#1a2744; text-decoration:none; display:block; margin:4px 0;">{item["title"]}</a>{paywall_tag}'
             f'<div style="font-size:11px; color:#999; margin-bottom:3px; margin-top:3px;">{meta}</div>'
@@ -453,7 +454,7 @@ def build_html(in_budget, overflow, total_sec, today_str):
 <div style="max-width:600px; margin:0 auto; background:#fff; border-radius:8px; padding:24px;">
   <div style="border-bottom:2px solid #1a2744; padding-bottom:12px; margin-bottom:4px;">
     <div style="font-size:20px; font-weight:700; color:#1a2744;">&#128218; Learning Digest</div>
-    <div style="font-size:13px; color:#999; margin-top:4px;">{today_str} · &#9201; {_fmt(total_sec)} curated reading</div>
+    <div style="font-size:13px; color:#999; margin-top:4px;">{today_str} &middot; &#9201; {_fmt(total_sec)} curated reading</div>
   </div>
 
   {section("&#128240; Articles &amp; News", articles, "No articles found today.")}
@@ -462,7 +463,7 @@ def build_html(in_budget, overflow, total_sec, today_str):
   {overflow_html}
 
   <div style="margin-top:24px; padding-top:12px; border-top:1px solid #eee; font-size:11px; color:#ccc; text-align:center;">
-    Learning Digest · Curated by Claude Opus · bsaleeb@gmail.com
+    Learning Digest &middot; Curated by Claude Opus &middot; bsaleeb@gmail.com
   </div>
 </div>
 </body>
@@ -484,7 +485,7 @@ def send_email(gmail_service, html_body, today_str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     today_str = datetime.datetime.now().strftime("%A, %B %-d, %Y")
-    print(f"📚 Running Learning Digest — {today_str}")
+    print(f"📚 Running Learning Digest - {today_str}")
 
     # Monday: look back 72h to catch weekend articles
     lookback_h = 72 if datetime.datetime.now().weekday() == 0 else 24
@@ -499,7 +500,7 @@ def main():
 
     candidates = articles + videos
     if not candidates:
-        print("No content found — skipping send.")
+        print("No content found - skipping send.")
         return
 
     print(f"🤖 Ranking {len(candidates)} items with Claude...")
