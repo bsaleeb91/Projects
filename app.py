@@ -224,6 +224,55 @@ st.set_page_config(page_title="Bible Commentary", page_icon="📖", layout="wide
 st.title("📖 Bible Commentary")
 st.caption("Answers drawn exclusively from your PDF commentary library.")
 
+with st.expander("How to use this app", expanded=False):
+    st.markdown("""
+**What this app does**
+Searches your personal library of PDF commentaries (Fr. Tadros Malaty + Ancient Christian Commentary)
+and answers your question using *only* what is written in those books — nothing else.
+
+---
+
+**What to ask**
+
+- **Verse questions** — *"What does John 3:16 mean?"* / *"Explain Romans 8:28"*
+- **Thematic questions** — *"What do the fathers say about baptism?"* / *"What does the commentary say about forgiveness?"*
+- **Author queries** — *"What does Chrysostom say about the Eucharist?"*
+- **Comparisons** — Select **Compare Both** and ask *"How do the two sources differ on Genesis 1:1?"*
+- **Follow-up questions** — The app remembers the last 10 turns, so you can say *"What about the same verse in Romans?"*
+
+---
+
+**Choosing a source**
+
+| Mode | What it searches |
+|------|-----------------|
+| All | Both Fr. Tadros Malaty and Ancient Christian Commentary |
+| Fr. Tadros Malaty | Tadros only |
+| Ancient Christian Commentary | ACC only |
+| Compare Both | Searches each source separately and asks Claude to compare them explicitly |
+
+---
+
+**How hallucination is handled**
+
+AI models can sometimes generate plausible-sounding answers that aren't actually in your books.
+This app has three layers of protection:
+
+1. **File selection** — before searching, Claude identifies which specific PDF volumes are relevant to your question, so only real commentary pages are retrieved
+2. **Strict instructions** — Claude is explicitly told never to fabricate quotes, page numbers, or content not present in the retrieved excerpts
+3. **Sources expander** — every answer includes a collapsible **Sources used** section showing the exact excerpts Claude had to work with. If an answer seems off, open it and verify
+
+If the commentaries don't cover your question, the app will say so rather than making something up.
+
+---
+
+**Tips**
+
+- Be specific — *"What does Fr. Tadros say about John 3:16?"* works better than *"Tell me about John"*
+- If an answer seems wrong, open **Sources used** to see what was actually retrieved
+- The app searches by keyword — unusual spellings or transliterations may not match well
+""")
+
 conn = get_db()
 if conn is None:
     st.error("Database not found. Run `python build_index.py` first.")
