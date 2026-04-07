@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% set current_user_role = 'teacher' %}
+{% block title %}Class Dashboard — Psalm Memorization{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h3 class="mb-0">Class Dashboard</h3>
+  <a href="{{ url_for('admin') }}" class="btn btn-outline-primary">Admin</a>
+</div>
+
+{% if overview %}
+<div class="card shadow-sm border-0">
+  <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Student</th>
+          <th>Current Psalm</th>
+          <th>Chunk</th>
+          <th>Mode</th>
+          <th class="text-end">Points</th>
+          <th class="text-end">Streak</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in overview %}
+        <tr>
+          <td>{{ s.name }}</td>
+          <td>{{ s.psalm_title }}</td>
+          <td>
+            {% if s.current_chunk == 0 %}Full{% elif s.current_chunk %}{{ s.current_chunk }}{% else %}—{% endif %}
+          </td>
+          <td>{{ s.current_mode | capitalize if s.current_mode else '—' }}</td>
+          <td class="text-end">{{ s.total_points }}</td>
+          <td class="text-end">{{ s.streak }} 🔥</td>
+          <td class="text-end">
+            <a href="{{ url_for('student_detail', student_id=s.id) }}" class="btn btn-sm btn-outline-secondary">
+              Details
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<p class="text-muted">No students yet. <a href="{{ url_for('admin') }}">Add students</a> from the Admin page.</p>
+{% endif %}
+{% endblock %}

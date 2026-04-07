@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% set current_user_role = 'student' %}
+{% block title %}My Progress — Psalm Memorization{% endblock %}
+
+{% block content %}
+<h3 class="mb-4">My Progress</h3>
+
+<div class="row g-3">
+  {% for p in psalms_status %}
+  <div class="col-12 col-md-6">
+    <div class="card h-100 border-0 shadow-sm
+      {% if p.status == 'mastered' %}border-success{% elif p.status == 'locked' %}opacity-50{% endif %}">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <h5 class="card-title mb-1">{{ p.title }}</h5>
+            <span class="badge
+              {% if p.status == 'mastered' %}bg-success
+              {% elif p.status == 'in_progress' %}bg-primary
+              {% else %}bg-secondary{% endif %}">
+              {{ p.status | replace('_', ' ') | title }}
+            </span>
+          </div>
+          {% if p.status == 'mastered' %}
+            <span class="fs-2">✅</span>
+          {% elif p.status == 'locked' %}
+            <span class="fs-2">🔒</span>
+          {% else %}
+            <span class="fs-2">📖</span>
+          {% endif %}
+        </div>
+        {% if p.status != 'locked' %}
+        <div class="mt-2 small text-muted">Full recitations: {{ p.mastery_count }}/3</div>
+        <div class="progress mt-1" style="height:6px;">
+          <div class="progress-bar bg-success" style="width:{{ (p.mastery_count / 3 * 100)|int }}%"></div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% set current_user_role = 'student' %}
+{% block title %}Dashboard — Psalm Memorization{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <h2>Hey, {{ user.name }}!</h2>
+  </div>
+
+  <!-- Stats row -->
+  <div class="col-6 col-md-3">
+    <div class="card text-center h-100 border-0 bg-light">
+      <div class="card-body">
+        <div class="display-6 fw-bold text-primary">{{ score.total_points if score else 0 }}</div>
+        <div class="small text-muted">Total Points</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center h-100 border-0 bg-light">
+      <div class="card-body">
+        <div class="display-6 fw-bold text-warning">{{ score.current_streak if score else 0 }}</div>
+        <div class="small text-muted">Day Streak 🔥</div>
+      </div>
+    </div>
+  </div>
+
+  {% if votd %}
+  <div class="col-12 col-md-6">
+    <div class="card border-0 bg-primary bg-opacity-10 h-100">
+      <div class="card-body">
+        <div class="small text-muted fw-semibold mb-1">Verse of the Day</div>
+        <p class="mb-0 fst-italic">"{{ votd }}"</p>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Continue button -->
+{% if current_psalm_id %}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-body text-center py-4">
+    <div class="text-muted small mb-1">Continue where you left off</div>
+    <h4 class="mb-1">{{ psalm_title }}</h4>
+    <p class="text-muted mb-3">
+      {% if current_chunk == 0 %}
+        Full Psalm Recitation
+      {% else %}
+        Chunk {{ current_chunk }} &mdash; {{ current_mode | capitalize }}
+      {% endif %}
+    </p>
+    <a href="{{ url_for('drill', psalm_id=current_psalm_id, chunk_number=current_chunk, mode=current_mode) }}"
+       class="btn btn-primary btn-lg px-5">
+      Continue
+    </a>
+  </div>
+</div>
+{% else %}
+<div class="alert alert-success text-center">
+  You have mastered all 8 Psalms! Amazing work!
+</div>
+{% endif %}
+
+<div class="d-flex gap-2">
+  <a href="{{ url_for('my_progress') }}" class="btn btn-outline-primary">My Progress</a>
+  <a href="{{ url_for('leaderboard') }}" class="btn btn-outline-secondary">Leaderboard</a>
+</div>
+{% endblock %}

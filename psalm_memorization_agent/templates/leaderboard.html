@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% set current_user_role = 'student' %}
+{% block title %}Leaderboard — Psalm Memorization{% endblock %}
+
+{% block content %}
+<h3 class="mb-4">Leaderboard</h3>
+
+{% if rows %}
+<div class="card shadow-sm border-0">
+  <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>#</th>
+          <th>Name</th>
+          <th class="text-end">Points</th>
+          <th class="text-end">Streak</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr {% if row.id == user.id %}class="table-primary fw-bold"{% endif %}>
+          <td>
+            {% if loop.index == 1 %}🥇
+            {% elif loop.index == 2 %}🥈
+            {% elif loop.index == 3 %}🥉
+            {% else %}{{ loop.index }}{% endif %}
+          </td>
+          <td>{{ row.name }} {% if row.id == user.id %}<span class="badge bg-primary">You</span>{% endif %}</td>
+          <td class="text-end">{{ row.total_points }}</td>
+          <td class="text-end">{{ row.current_streak }} 🔥</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<p class="text-muted">No scores yet — be the first!</p>
+{% endif %}
+{% endblock %}

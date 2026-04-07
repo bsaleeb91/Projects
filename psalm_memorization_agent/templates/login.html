@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Login — Psalm Memorization{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center mt-4">
+  <div class="col-md-5">
+    <div class="card shadow-sm">
+      <div class="card-body p-4">
+        <h2 class="card-title text-center mb-1">Welcome</h2>
+        <p class="text-center text-muted mb-4">Psalm Memorization App</p>
+
+        <!-- Magic Link -->
+        <form method="POST">
+          <input type="hidden" name="action" value="magic_link" />
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Email address</label>
+            <input type="email" name="email" class="form-control form-control-lg"
+                   placeholder="your@email.com" required />
+          </div>
+          <button type="submit" class="btn btn-primary w-100 btn-lg">
+            Send me a login link
+          </button>
+        </form>
+
+        <hr class="my-4" />
+
+        <!-- Login code fallback -->
+        <p class="text-center text-muted small mb-2">
+          No email? Use a teacher-generated code.
+        </p>
+        <form method="POST">
+          <input type="hidden" name="action" value="login_code" />
+          <div class="input-group">
+            <input type="text" name="code" class="form-control text-uppercase"
+                   placeholder="6-character code" maxlength="6" style="letter-spacing:0.2em;" />
+            <button type="submit" class="btn btn-outline-secondary">Login</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

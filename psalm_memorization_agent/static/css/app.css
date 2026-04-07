@@ -1,0 +1,25 @@
+body {
+  background-color: #f8f9fa;
+  font-size: 1rem;
+}
+
+.navbar-brand {
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+}
+
+textarea.form-control {
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.lead {
+  font-size: 1.1rem;
+}
+
+@media (max-width: 576px) {
+  h2 { font-size: 1.4rem; }
+  h3 { font-size: 1.2rem; }
+  .display-6 { font-size: 2rem; }
+  .btn-lg { font-size: 1rem; padding: 0.6rem 1.2rem; }
+}

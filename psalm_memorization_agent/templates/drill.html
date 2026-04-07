@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% set current_user_role = 'student' %}
+{% block title %}{{ psalm.title }} — {{ mode | capitalize }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-8">
+
+    <!-- Header -->
+    <div class="mb-3">
+      <h4 class="mb-0">{{ psalm.title }}</h4>
+      <span class="badge bg-secondary">
+        {% if chunk_number == 0 %}Full Psalm{% else %}Chunk {{ chunk_number }}{% endif %}
+        &mdash;
+        {% if mode == 'study' %}Study{% elif mode == 'blank' %}Fill in the Blank{% elif mode == 'letters' %}First Letter Hints{% else %}Full Recitation{% endif %}
+      </span>
+    </div>
+
+    {% if result %}
+    <!-- Result card -->
+    <div class="card mb-4 border-0 {% if result.passed %}bg-success bg-opacity-10{% else %}bg-danger bg-opacity-10{% endif %}">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-3 mb-2">
+          {% if result.passed %}
+            <span class="fs-2">✅</span>
+            <div>
+              <div class="fw-bold">Passed! Score: {{ "%.0f"|format(result.score * 100) }}%</div>
+              {% if result.points > 0 %}
+                <div class="text-success small">+{{ result.points }} points</div>
+              {% endif %}
+            </div>
+          {% else %}
+            <span class="fs-2">❌</span>
+            <div>
+              <div class="fw-bold">Not quite. Score: {{ "%.0f"|format(result.score * 100) }}%</div>
+              <div class="text-muted small">Need 80% to advance</div>
+            </div>
+          {% endif %}
+        </div>
+
+        {% if feedback_message %}
+        <p class="mb-0 fst-italic border-start border-3 ps-3">{{ feedback_message }}</p>
+        {% endif %}
+
+        {% if result.is_psalm_mastery %}
+        <div class="alert alert-warning mt-3 mb-0">
+          <strong>Psalm Mastered!</strong> You've completed this psalm 3 times!
+        </div>
+        {% elif result.is_chunk_mastery and chunk_number > 0 %}
+        <div class="alert alert-info mt-3 mb-0">
+          <strong>Chunk Mastered!</strong>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Continue / Try Again -->
+    <div class="d-flex gap-2 mb-4">
+      <a href="{{ next_url }}" class="btn {% if result.passed %}btn-primary{% else %}btn-outline-primary{% endif %} btn-lg">
+        {% if result.passed %}Continue{% else %}Try Again{% endif %}
+      </a>
+      <a href="{{ url_for('student_dashboard') }}" class="btn btn-outline-secondary">Dashboard</a>
+    </div>
+
+    {% else %}
+    <!-- Drill form (GET) -->
+
+    {% if mode == 'study' %}
+    <!-- Study mode: read-only -->
+    <div class="card mb-4">
+      <div class="card-body">
+        <p class="lead mb-0" style="line-height:1.9;">{{ correct_text }}</p>
+      </div>
+    </div>
+    <form method="POST">
+      <button type="submit" class="btn btn-primary btn-lg">I'm Ready — Continue</button>
+    </form>
+
+    {% elif mode in ('blank', 'letters') %}
+    <div class="card mb-3 bg-light border-0">
+      <div class="card-body">
+        <p class="mb-1 small text-muted fw-semibold">
+          {% if mode == 'blank' %}Fill in the missing words:{% else %}Type the full passage (first letters shown):{% endif %}
+        </p>
+        <p class="lead mb-0" style="line-height:2; font-family:monospace;">{{ chunk_display }}</p>
+      </div>
+    </div>
+    <form method="POST">
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Type the passage:</label>
+        <textarea name="typed_text" class="form-control" rows="5"
+                  placeholder="Type here..." autofocus required></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg">Check My Answer</button>
+    </form>
+
+    {% else %}
+    <!-- Full recitation -->
+    <div class="card mb-3 bg-light border-0">
+      <div class="card-body">
+        <p class="mb-0 text-muted">Type the passage entirely from memory.</p>
+        {% if cp %}
+        <div class="mt-2">
+          <div class="small text-muted">Mastery progress: {{ cp.success_count }}/3</div>
+          <div class="progress mt-1" style="height:6px;">
+            <div class="progress-bar bg-success" style="width:{{ (cp.success_count / 3 * 100)|int }}%"></div>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    <form method="POST">
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Type from memory:</label>
+        <textarea name="typed_text" class="form-control" rows="6"
+                  placeholder="Begin typing..." autofocus required></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg">Check My Answer</button>
+    </form>
+    {% endif %}
+
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
