@@ -5,6 +5,10 @@ on:
     - cron: "0 6 * * 1"  # Every Monday at 6am UTC
   workflow_dispatch:       # Also allows manual trigger from GitHub
 
+permissions:
+  contents: write  # for committing the updated index
+  issues: write    # for the failure-notification step
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -22,22 +26,18 @@ jobs:
         run: pip install anthropic google-api-python-client google-auth-oauthlib
 
       - name: Write credentials files
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
         run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
-          echo '${{ secrets.GOOGLE_TOKEN_JSON }}'       > drive_token.json
+          printf '%s' "$GOOGLE_CREDENTIALS_JSON" > credentials.json
+          printf '%s' "$GOOGLE_TOKEN_JSON"       > drive_token.json
 
       - name: Run sync
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DRIVE_FOLDER_ID:   ${{ secrets.DRIVE_FOLDER_ID }}
         run: python commentary_agent.py sync
-
-      - name: Save refreshed token back to GitHub secret
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          NEW_TOKEN=$(cat drive_token.json)
-          echo "$NEW_TOKEN" | gh secret set GOOGLE_TOKEN_JSON --repo "$GH_REPO"
 
       - name: Commit updated index
         run: |

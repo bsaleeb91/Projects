@@ -148,17 +148,34 @@ def cmd_sync(folder_id: str | None, set_folder: bool = False,
         print(f"  Credentials  : {credentials_path}")
         print(f"  Token        : {token_path}\n")
     else:
-        folder_id        = folder_id        or index.get("_folder_id")
-        credentials_path = credentials_path or index.get("_credentials")
-        token_path       = token_path       or index.get("_token")
+        # CI path: DRIVE_FOLDER_ID env var is set, and credentials/token files
+        # are written to the workspace root by the workflow. Ignore any
+        # index-stored paths (they may be Windows paths from local dev).
+        if os.environ.get("DRIVE_FOLDER_ID"):
+            folder_id        = folder_id        or os.environ["DRIVE_FOLDER_ID"]
+            credentials_path = credentials_path or "credentials.json"
+            token_path       = token_path       or "drive_token.json"
+        else:
+            folder_id        = folder_id        or index.get("_folder_id")
+            credentials_path = credentials_path or index.get("_credentials")
+            token_path       = token_path       or index.get("_token")
 
-    if not all([folder_id, credentials_path, token_path]):
+    if not folder_id:
         print(
-            "Missing configuration. Run once with --set-folder to save your settings:\n"
-            "  python commentary_agent.py sync <folder-id> --set-folder \\\n"
-            '      --credentials "C:\\path\\to\\credentials.json" \\\n'
-            '      --token "C:\\path\\to\\token.json"'
+            "Missing Drive folder ID. Either:\n"
+            "  - set the DRIVE_FOLDER_ID environment variable, or\n"
+            "  - run once with --set-folder to persist your settings:\n"
+            "      python commentary_agent.py sync <folder-id> --set-folder \\\n"
+            '          --credentials "C:\\path\\to\\credentials.json" \\\n'
+            '          --token "C:\\path\\to\\token.json"'
         )
+        sys.exit(1)
+
+    if not Path(credentials_path).exists():
+        print(f"Credentials file not found: {credentials_path}")
+        sys.exit(1)
+    if not Path(token_path).exists():
+        print(f"Token file not found: {token_path}")
         sys.exit(1)
 
     print("Connecting to Google Drive...", flush=True)
