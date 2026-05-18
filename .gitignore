@@ -5,6 +5,10 @@ drive_token.json
 .env
 
 
+# Database — built locally, uploaded to Render persistent disk (not stored in repo)
+commentary.db
+*.db
+
 # Python
 __pycache__/
 *.pyc

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-app.py — Streamlit Bible Commentary Chat App
+app.py -- Streamlit Bible Commentary Chat App
 
 Answers questions from your PDF commentary library using SQLite FTS5 search
 and Claude Sonnet 4.6. Run build_index.py first to build the database.
@@ -19,7 +19,6 @@ from pathlib import Path
 import anthropic
 import streamlit as st
 
-# Load .env from same directory
 _env_file = Path(__file__).parent / ".env"
 if _env_file.exists():
     for line in _env_file.read_text().splitlines():
@@ -28,14 +27,13 @@ if _env_file.exists():
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
 DB_PATH = Path(__file__).parent / "commentary.db"
 MODEL = "claude-sonnet-4-6"
-MAX_HISTORY = 10   # conversation turns kept in Claude context
-FTS_TOP_N = 20     # max chunks returned from FTS search
+MAX_HISTORY = 10
+FTS_TOP_N = 20
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+
+# -- Data helpers --------------------------------------------------------------
 
 @st.cache_resource
 def get_anthropic_client():
@@ -52,88 +50,103 @@ def get_db():
 
 
 @st.cache_data
-def get_filenames(_conn, source_filter: str | None) -> list[str]:
-    """Return distinct filenames in the DB, optionally filtered by source."""
-    if source_filter:
-        rows = _conn.execute(
-            "SELECT DISTINCT filename FROM chunks WHERE source = ? ORDER BY filename",
-            (source_filter,),
-        ).fetchall()
-    else:
-        rows = _conn.execute(
-            "SELECT DISTINCT filename FROM chunks ORDER BY filename"
-        ).fetchall()
+def get_sources(_conn) -> list[str]:
+    rows = _conn.execute(
+        "SELECT DISTINCT source FROM chunks ORDER BY source"
+    ).fetchall()
     return [r[0] for r in rows]
 
 
-def select_files_and_keywords(
-    client: anthropic.Anthropic, question: str, filenames: list[str]
+# -- Claude calls --------------------------------------------------------------
+
+def select_sources_and_keywords(
+    client: anthropic.Anthropic,
+    question: str,
+    all_sources: list[str],
 ) -> tuple[list[str], list[str]]:
-    """Single Claude call: pick relevant files AND generate search keywords."""
-    file_list = "\n".join(f"- {f}" for f in filenames)
+    """One Claude call: pick relevant sources AND generate search keywords."""
+    source_list = "\n".join(f"- {s}" for s in all_sources)
     response = client.messages.create(
         model=MODEL,
         max_tokens=512,
         messages=[{
             "role": "user",
             "content": (
-                f"Question: \"{question}\"\n\n"
-                f"Available commentary files:\n{file_list}\n\n"
+                f'Question: "{question}"\n\n'
+                f"Available commentary sources:\n{source_list}\n\n"
                 "Respond in exactly this format (no other text):\n"
-                "FILES:\n"
-                "<filename1>\n"
-                "<filename2>\n"
+                "SOURCES:\n"
+                "<source1>\n"
+                "<source2>\n"
                 "KEYWORDS:\n"
                 "<keyword1>, <keyword2>, <keyword3>\n\n"
-                "FILES: list only the filenames most likely to contain commentary on this question.\n"
+                "SOURCES: list only the sources most likely to contain commentary on this question. "
+                "Use the exact source names from the list above.\n"
                 "KEYWORDS: verse references AND synonyms/related terms for full-text search "
-                "(e.g. for 'John 3:16' → John 3:16, 3:16, For God so loved, eternal life, believe, faith)."
+                "(e.g. for 'John 3:16' -> John 3:16, 3:16, For God so loved, eternal life, believe, faith)."
             ),
         }],
     )
     text = response.content[0].text.strip()
 
-    selected_files: list[str] = []
+    selected_sources: list[str] = []
     keywords: list[str] = []
     section = None
     for line in text.splitlines():
         line = line.strip()
-        if line == "FILES:":
-            section = "files"
+        if line == "SOURCES:":
+            section = "sources"
         elif line == "KEYWORDS:":
             section = "keywords"
-        elif section == "files" and line:
-            selected_files.append(line)
+        elif section == "sources" and line:
+            selected_sources.append(line)
         elif section == "keywords" and line:
             keywords = [k.strip() for k in line.split(",") if k.strip()]
 
-    return selected_files, keywords
+    return selected_sources, keywords
 
+
+def generate_keywords(
+    client: anthropic.Anthropic,
+    question: str,
+) -> list[str]:
+    """Generate FTS keywords when sources are already known."""
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=128,
+        messages=[{
+            "role": "user",
+            "content": (
+                f'Question: "{question}"\n\n'
+                "Generate search keywords for a full-text search of Bible commentaries. "
+                "Include verse references AND synonyms/related terms. "
+                "Respond with ONLY a comma-separated list of keywords, nothing else.\n"
+                "Example: John 3:16, 3:16, For God so loved, eternal life, believe, faith"
+            ),
+        }],
+    )
+    return [k.strip() for k in response.content[0].text.strip().split(",") if k.strip()]
+
+
+# -- Search --------------------------------------------------------------------
 
 def fts_search(
     conn: sqlite3.Connection,
     keywords: list[str],
-    source_filter: str | None,
-    filenames: list[str] | None = None,
+    sources: list[str] | None = None,
     top_n: int = FTS_TOP_N,
 ) -> list[sqlite3.Row]:
-    """FTS search, optionally filtered by source and/or specific filenames."""
     if not keywords:
         return []
 
     fts_query = " OR ".join(f'"{k}"' for k in keywords)
-
     conditions = ["chunks_fts MATCH ?"]
     params: list = [fts_query]
 
-    if source_filter:
-        conditions.append("c.source = ?")
-        params.append(source_filter)
-
-    if filenames:
-        placeholders = ", ".join("?" * len(filenames))
-        conditions.append(f"c.filename IN ({placeholders})")
-        params.extend(filenames)
+    if sources:
+        placeholders = ", ".join("?" * len(sources))
+        conditions.append(f"c.source IN ({placeholders})")
+        params.extend(sources)
 
     params.append(top_n)
     where = " AND ".join(conditions)
@@ -157,26 +170,30 @@ def format_context(rows: list[sqlite3.Row]) -> str:
     parts = []
     for row in rows:
         parts.append(
-            f"[{row['source']} — {row['filename']}, page {row['page_number']}]\n"
+            f"[{row['source']} -- {row['filename']}, page {row['page_number']}]\n"
             f"{row['chunk_text']}"
         )
     return "\n\n---\n\n".join(parts)
 
 
-def build_system_prompt(mode: str) -> str:
+# -- Answer generation ---------------------------------------------------------
+
+def build_system_prompt(compare_sources: list[str] | None = None) -> str:
     base = (
         "You are a Bible commentary assistant. "
-        "Answer using ONLY the commentary excerpts provided below — no outside knowledge, ever. "
-        "Do NOT fabricate quotes, page numbers, or content not explicitly present in the excerpts. "
+        "Answer using ONLY the commentary excerpts provided -- no outside knowledge, ever. "
+        "Do NOT fabricate quotes, page numbers, or content not present in the excerpts. "
         "Every quote must be verbatim from the excerpts. "
-        "If the excerpts do not contain commentary on the topic asked, say so plainly — do not guess or extrapolate. "
-        "Cite sources as: (Source — filename, page N), using only page numbers that appear in the excerpts."
+        "If the excerpts do not contain commentary on the topic asked, say so plainly. "
+        "Cite sources as: (Source -- filename, page N), using only page numbers from the excerpts."
     )
-    if mode == "Compare Both":
+    if compare_sources:
+        names = " vs. ".join(compare_sources)
         base += (
-            "\n\nThe user has selected Compare Both mode. "
-            "Explicitly compare what Fr. Tadros Malaty says versus what the Ancient Christian Commentary says. "
-            "If one source does not cover this topic in the provided excerpts, state that clearly."
+            f"\n\nThe user wants a comparison across these sources: {names}. "
+            "Structure your answer by source -- summarize what each says, "
+            "then note where they agree or differ. "
+            "If a source has no excerpts on the topic, state that clearly."
         )
     return base
 
@@ -186,7 +203,7 @@ def stream_answer(
     question: str,
     context: str,
     history: list[dict],
-    mode: str,
+    compare_sources: list[str] | None,
 ):
     messages = list(history[-(MAX_HISTORY * 2):])
     messages.append({
@@ -196,82 +213,18 @@ def stream_answer(
     with client.messages.stream(
         model=MODEL,
         max_tokens=4096,
-        system=build_system_prompt(mode),
+        system=build_system_prompt(compare_sources),
         messages=messages,
     ) as stream:
         for text in stream.text_stream:
             yield text
 
 
-def search_one_source(
-    client: anthropic.Anthropic,
-    conn: sqlite3.Connection,
-    question: str,
-    source: str | None,
-    status,
-) -> tuple[str, list[sqlite3.Row]]:
-    """Select relevant files, run FTS, return (formatted context, raw rows)."""
-    filenames = get_filenames(conn, source)
-    selected, keywords = select_files_and_keywords(client, question, filenames)
-    status.write(f"Files: {', '.join(selected) or 'all'} | Keywords: {', '.join(keywords)}")
-    rows = fts_search(conn, keywords, source, selected or None)
-    return format_context(rows), rows
-
-
-# ── Streamlit UI ──────────────────────────────────────────────────────────────
+# -- UI ------------------------------------------------------------------------
 
 st.set_page_config(page_title="Bible Commentary", page_icon="📖", layout="wide")
 st.title("📖 Bible Commentary")
 st.caption("Answers drawn exclusively from your PDF commentary library.")
-
-with st.expander("How to use this app", expanded=False):
-    st.markdown("""
-**What this app does**
-Searches your personal library of PDF commentaries (Fr. Tadros Malaty + Ancient Christian Commentary)
-and answers your question using *only* what is written in those books — nothing else.
-
----
-
-**What to ask**
-
-- **Verse questions** — *"What does John 3:16 mean?"* / *"Explain Romans 8:28"*
-- **Thematic questions** — *"What do the fathers say about baptism?"* / *"What does the commentary say about forgiveness?"*
-- **Author queries** — *"What does Chrysostom say about the Eucharist?"*
-- **Comparisons** — Select **Compare Both** and ask *"How do the two sources differ on Genesis 1:1?"*
-- **Follow-up questions** — The app remembers the last 10 turns, so you can say *"What about the same verse in Romans?"*
-
----
-
-**Choosing a source**
-
-| Mode | What it searches |
-|------|-----------------|
-| All | Both Fr. Tadros Malaty and Ancient Christian Commentary |
-| Fr. Tadros Malaty | Tadros only |
-| Ancient Christian Commentary | ACC only |
-| Compare Both | Searches each source separately and asks Claude to compare them explicitly |
-
----
-
-**How hallucination is handled**
-
-AI models can sometimes generate plausible-sounding answers that aren't actually in your books.
-This app has three layers of protection:
-
-1. **File selection** — before searching, Claude identifies which specific PDF volumes are relevant to your question, so only real commentary pages are retrieved
-2. **Strict instructions** — Claude is explicitly told never to fabricate quotes, page numbers, or content not present in the retrieved excerpts
-3. **Sources expander** — every answer includes a collapsible **Sources used** section showing the exact excerpts Claude had to work with. If an answer seems off, open it and verify
-
-If the commentaries don't cover your question, the app will say so rather than making something up.
-
----
-
-**Tips**
-
-- Be specific — *"What does Fr. Tadros say about John 3:16?"* works better than *"Tell me about John"*
-- If an answer seems wrong, open **Sources used** to see what was actually retrieved
-- The app searches by keyword — unusual spellings or transliterations may not match well
-""")
 
 conn = get_db()
 if conn is None:
@@ -279,13 +232,43 @@ if conn is None:
     st.stop()
 
 client = get_anthropic_client()
+all_sources = get_sources(conn)
 
-mode = st.radio(
-    "Source",
-    options=["All", "Fr. Tadros Malaty", "Ancient Christian Commentary", "Compare Both"],
-    horizontal=True,
-    label_visibility="collapsed",
-)
+# Sidebar
+with st.sidebar:
+    st.header("Sources")
+    selected_sources = st.multiselect(
+        "Filter by source",
+        options=all_sources,
+        placeholder="All sources (auto-selected)",
+        help="Leave blank to search all sources. Select 2+ to enable Compare mode.",
+    )
+
+    compare_mode = False
+    if len(selected_sources) >= 2:
+        compare_mode = st.toggle("Compare selected sources", value=False)
+
+    st.divider()
+    with st.expander("How to use"):
+        st.markdown("""
+**What to ask**
+- *"What does John 3:16 mean?"*
+- *"What do the fathers say about baptism?"*
+- *"What does Chrysostom say about the Eucharist?"*
+
+**Selecting sources**
+Leave blank to search all sources -- the app picks the most relevant ones automatically.
+Select one to focus. Select two or more and toggle **Compare** for a side-by-side.
+
+**Hallucination prevention**
+Claude only uses retrieved excerpts -- never outside knowledge.
+The **Sources used** expander shows exactly what it had to work with.
+
+**Tips**
+- Be specific -- verse references work best
+- The app remembers the last 10 turns
+- If an answer seems off, check Sources used to verify
+""")
 
 st.divider()
 
@@ -302,20 +285,38 @@ if question := st.chat_input("Ask a question about the Bible..."):
 
     with st.status("Searching commentaries...", expanded=False) as status:
         all_rows: list[sqlite3.Row] = []
-        if mode == "Compare Both":
-            tadros_context, tadros_rows = search_one_source(client, conn, question, "Fr. Tadros Malaty", status)
-            acc_context, acc_rows = search_one_source(client, conn, question, "Ancient Christian Commentary", status)
-            tadros_block = "=== Fr. Tadros Malaty ===\n\n" + (tadros_context or "(No matching excerpts found.)")
-            acc_block = "=== Ancient Christian Commentary ===\n\n" + (acc_context or "(No matching excerpts found.)")
-            context = tadros_block + "\n\n" + acc_block
-            all_rows = tadros_rows + acc_rows
+        context = ""
+
+        if compare_mode:
+            # Generate keywords once, search each selected source separately
+            keywords = generate_keywords(client, question)
+            status.write(f"Keywords: {', '.join(keywords)}")
+            context_blocks = []
+            for source in selected_sources:
+                rows = fts_search(conn, keywords, sources=[source])
+                all_rows.extend(rows)
+                block = format_context(rows) or "(No matching excerpts found.)"
+                context_blocks.append(f"=== {source} ===\n\n{block}")
+                status.write(f"{source}: {len(rows)} excerpts")
+            context = "\n\n".join(context_blocks)
+
+        elif selected_sources:
+            # User picked specific sources -- just generate keywords
+            keywords = generate_keywords(client, question)
+            status.write(f"Keywords: {', '.join(keywords)}")
+            all_rows = fts_search(conn, keywords, sources=selected_sources)
+            context = format_context(all_rows)
+
         else:
-            source_filter = None if mode == "All" else mode
-            context, all_rows = search_one_source(client, conn, question, source_filter, status)
+            # All sources -- Claude picks the relevant ones + keywords
+            picked, keywords = select_sources_and_keywords(client, question, all_sources)
+            valid = [s for s in picked if s in set(all_sources)]
+            status.write(f"Sources: {', '.join(valid) or 'all'} | Keywords: {', '.join(keywords)}")
+            all_rows = fts_search(conn, keywords, sources=valid or None)
+            context = format_context(all_rows)
 
         if not context:
             status.update(label="No matching excerpts found.", state="error")
-            st.warning("No matching content found in your commentaries for that question.")
         else:
             status.update(label="Found relevant excerpts. Answering...", state="complete")
 
@@ -328,7 +329,10 @@ if question := st.chat_input("Ask a question about the Bible..."):
         with st.chat_message("assistant"):
             placeholder = st.empty()
             full_answer = ""
-            for chunk in stream_answer(client, question, context, history_for_claude, mode):
+            for chunk in stream_answer(
+                client, question, context, history_for_claude,
+                selected_sources if compare_mode else None,
+            ):
                 full_answer += chunk
                 placeholder.markdown(full_answer + "▌")
             placeholder.markdown(full_answer)
@@ -339,14 +343,16 @@ if question := st.chat_input("Ask a question about the Bible..."):
         if len(st.session_state.messages) > MAX_HISTORY * 2:
             st.session_state.messages = st.session_state.messages[-(MAX_HISTORY * 2):]
 
-        # Show retrieved excerpts so the user can verify the answer
         with st.expander("Sources used", expanded=False):
             if all_rows:
                 for row in all_rows:
                     st.markdown(
-                        f"**{row['source']} — {row['filename']}, page {row['page_number']}**"
+                        f"**{row['source']} -- {row['filename']}, page {row['page_number']}**"
                     )
                     st.caption(row["chunk_text"])
                     st.divider()
             else:
                 st.write("No excerpts retrieved.")
+
+    elif not context:
+        st.warning("No matching content found in your commentaries for that question.")

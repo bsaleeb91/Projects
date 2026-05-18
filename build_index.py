@@ -1,46 +1,35 @@
 #!/usr/bin/env python3
 """
-build_index.py — Build SQLite FTS5 index from Google Drive PDFs.
+build_index.py — Build SQLite FTS5 index from a local folder of PDFs.
 
-Run once before launching app.py (or as part of Render's build command).
-Takes 1–2 hours for 110 large PDFs.
+Run once on your laptop before uploading commentary.db to Render.
+Takes several hours for ~500 large PDFs — run it overnight.
 
 Usage:
-  python build_index.py
+  python build_index.py --folder "/path/to/002. Patristics"
 
-Credentials:
-  Reads from environment variables (Render / GitHub Actions):
-    GOOGLE_CREDENTIALS_JSON   full contents of credentials.json
-    GOOGLE_TOKEN_JSON         full contents of drive_token.json
-    DRIVE_FOLDER_ID           Google Drive folder ID to scan
+  Optional: specify a custom DB output path
+  python build_index.py --folder "/path/to/002. Patristics" --db /path/to/commentary.db
 
-  Falls back to local files if env vars are not set:
-    commentary_index.json     for _folder_id, _credentials, _token paths
+Folder structure expected:
+  <root>/
+    <Source Name>/        <- subfolder name becomes the source label in the app
+      book1.pdf
+      book2.pdf
+      <subfolder>/        <- nested folders supported; source is always top-level name
+        book3.pdf
 """
 
-import io
-import json
-import os
+import argparse
 import sqlite3
-import sys
-import tempfile
 from pathlib import Path
 
-# Load .env from same directory
-_env_file = Path(__file__).parent / ".env"
-if _env_file.exists():
-    for line in _env_file.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip())
-
 DB_PATH = Path(__file__).parent / "commentary.db"
-INDEX_FILE = Path(__file__).parent / "commentary_index.json"
 
-CHUNK_SIZE = 500  # words per chunk
+CHUNK_SIZE = 500   # words per chunk
+OVERLAP    = 50    # word overlap between chunks
 
-# Files that are not actual commentary — skip during indexing
+# Filenames to skip regardless of source folder
 BLACKLIST = {
     "ACCS INTRODUCTION AND BIBLIOGRAPHIC INFORMATION.pdf",
     "MELTHO... Syriac OpenType Fonts for Windows XP.pdf",
@@ -52,127 +41,24 @@ BLACKLIST = {
 }
 
 
-def build_drive_service_from_env():
-    """Build Drive service from env vars (Render/CI) or fall back to local files."""
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
+# ── Core helpers ──────────────────────────────────────────────────────────────
 
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    token_json = os.environ.get("GOOGLE_TOKEN_JSON")
-
-    if creds_json and token_json:
-        # Running in CI / Render — write temp files
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
-            tf.write(token_json)
-            token_path = tf.name
-        creds = Credentials.from_authorized_user_file(
-            token_path,
-            scopes=["https://www.googleapis.com/auth/drive.readonly"],
-        )
-        os.unlink(token_path)
-    else:
-        # Local dev — read paths from commentary_index.json
-        if not INDEX_FILE.exists():
-            print("No credentials found. Set GOOGLE_CREDENTIALS_JSON / GOOGLE_TOKEN_JSON env vars,")
-            print("or run: python commentary_agent.py sync --set-folder ... to save local config.")
-            sys.exit(1)
-        index = json.loads(INDEX_FILE.read_text())
-        token_path = index.get("_token")
-        if not token_path:
-            print("No token path in commentary_index.json. Run sync --set-folder first.")
-            sys.exit(1)
-        creds = Credentials.from_authorized_user_file(
-            token_path,
-            scopes=["https://www.googleapis.com/auth/drive.readonly"],
-        )
-
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-
-    return build("drive", "v3", credentials=creds)
+def detect_source(pdf_path: Path, root: Path) -> str:
+    """Top-level subfolder name relative to root = source label."""
+    try:
+        return pdf_path.relative_to(root).parts[0]
+    except (ValueError, IndexError):
+        return pdf_path.stem
 
 
-def get_folder_id() -> str:
-    folder_id = os.environ.get("DRIVE_FOLDER_ID")
-    if folder_id:
-        return folder_id
-    if INDEX_FILE.exists():
-        index = json.loads(INDEX_FILE.read_text())
-        folder_id = index.get("_folder_id")
-        if folder_id:
-            return folder_id
-    print("No Drive folder ID found. Set DRIVE_FOLDER_ID env var or run sync --set-folder.")
-    sys.exit(1)
-
-
-def list_drive_pdfs(service, folder_id: str) -> list[dict]:
-    """Return all PDFs in the given Drive folder, recursively through subfolders."""
-    pdfs = []
-
-    def _collect(fid: str, path: str = ""):
-        page_token = None
-        while True:
-            resp = service.files().list(
-                q=f"'{fid}' in parents and mimeType='application/pdf' and trashed=false",
-                fields="nextPageToken, files(id, name, md5Checksum)",
-                pageToken=page_token,
-            ).execute()
-            for f in resp.get("files", []):
-                f["_path"] = path
-            pdfs.extend(resp.get("files", []))
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
-        page_token = None
-        while True:
-            resp = service.files().list(
-                q=f"'{fid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
-                fields="nextPageToken, files(id, name)",
-                pageToken=page_token,
-            ).execute()
-            for subfolder in resp.get("files", []):
-                _collect(subfolder["id"], path=f"{path}/{subfolder['name']}" if path else subfolder["name"])
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
-
-    _collect(folder_id)
-    return pdfs
-
-
-def download_drive_file(service, file_id: str) -> bytes:
-    from googleapiclient.http import MediaIoBaseDownload
-
-    request = service.files().get_media(fileId=file_id)
-    buf = io.BytesIO()
-    downloader = MediaIoBaseDownload(buf, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return buf.getvalue()
-
-
-def detect_source(path: str, filename: str) -> str:
-    """Infer commentary source from Drive folder path or filename."""
-    combined = (path + "/" + filename).lower()
-    if "tadros" in combined or "malaty" in combined:
-        return "Fr. Tadros Malaty"
-    if "ancient christian" in combined or "acc" in combined:
-        return "Ancient Christian Commentary"
-    return "Unknown"
-
-
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> list[str]:
-    """Split text into ~chunk_size word chunks with slight overlap."""
+def chunk_text(text: str) -> list[str]:
+    """Split text into ~CHUNK_SIZE word chunks with slight overlap."""
     words = text.split()
     chunks = []
-    overlap = 50
     i = 0
     while i < len(words):
-        chunk = words[i: i + chunk_size]
-        chunks.append(" ".join(chunk))
-        i += chunk_size - overlap
+        chunks.append(" ".join(words[i: i + CHUNK_SIZE]))
+        i += CHUNK_SIZE - OVERLAP
     return chunks
 
 
@@ -202,35 +88,35 @@ def init_db(conn: sqlite3.Connection):
     conn.commit()
 
 
-def already_indexed(conn: sqlite3.Connection, filename: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM chunks WHERE filename = ? LIMIT 1", (filename,)
-    ).fetchone()
-    return row is not None
+def already_indexed(conn: sqlite3.Connection, filename: str, source: str) -> bool:
+    """Check by (source, filename) so same-named files in different sources both get indexed."""
+    return conn.execute(
+        "SELECT 1 FROM chunks WHERE source = ? AND filename = ? LIMIT 1",
+        (source, filename),
+    ).fetchone() is not None
 
 
-def index_pdf(conn: sqlite3.Connection, pdf_bytes: bytes, filename: str, source: str):
-    """Extract pages, chunk, and insert into DB."""
+def index_pdf(conn: sqlite3.Connection, pdf_path: Path, source: str) -> int:
+    """Extract pages, chunk text, insert into DB. Returns number of chunks added."""
     import fitz  # pymupdf
 
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = fitz.open(str(pdf_path))
     except Exception as e:
-        print(f"    Could not read PDF: {e}")
+        print(f"    Could not open: {e}")
         return 0
 
     rows = []
     for i, page in enumerate(doc):
         try:
-            text = page.get_text() or ""
+            text = (page.get_text() or "").strip()
         except Exception:
-            continue  # skip unreadable page, keep going
-        text = text.strip()
+            continue
         if not text:
             continue
         for chunk in chunk_text(text):
             if chunk.strip():
-                rows.append((source, filename, i + 1, chunk))
+                rows.append((source, pdf_path.name, i + 1, chunk))
 
     if rows:
         conn.executemany(
@@ -242,49 +128,74 @@ def index_pdf(conn: sqlite3.Connection, pdf_bytes: bytes, filename: str, source:
     return len(rows)
 
 
-def main():
-    print("Connecting to Google Drive...", flush=True)
-    service = build_drive_from_env = build_drive_service_from_env()
-    folder_id = get_folder_id()
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-    print(f"Scanning folder {folder_id} for PDFs...", flush=True)
-    all_pdfs = list_drive_pdfs(service, folder_id)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Build commentary FTS5 index from a local folder of PDFs."
+    )
+    parser.add_argument(
+        "--folder", required=True,
+        help="Root folder — one subfolder per commentary source",
+    )
+    parser.add_argument(
+        "--db", default=str(DB_PATH),
+        help=f"Output SQLite database path (default: {DB_PATH})",
+    )
+    args = parser.parse_args()
+
+    root = Path(args.folder).resolve()
+    if not root.exists():
+        print(f"Error: folder not found: {root}")
+        raise SystemExit(1)
+
+    db_path = Path(args.db)
+    print(f"Root folder : {root}")
+    print(f"Database    : {db_path}\n")
+
+    all_pdfs = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".pdf")
     print(f"Found {len(all_pdfs)} PDFs.\n")
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     init_db(conn)
 
-    skipped = 0
-    indexed = 0
-    for i, pdf_file in enumerate(all_pdfs):
-        name = pdf_file["name"]
-        source = detect_source(pdf_file.get("_path", ""), name)
+    indexed = skipped = errors = 0
+
+    for i, pdf_path in enumerate(all_pdfs):
+        name   = pdf_path.name
+        source = detect_source(pdf_path, root)
+        prefix = f"[{i+1}/{len(all_pdfs)}]"
 
         if name in BLACKLIST:
-            print(f"[{i+1}/{len(all_pdfs)}] Skipping (blacklisted): {name}")
+            print(f"{prefix} BLACKLISTED -- {name}")
             skipped += 1
             continue
 
-        if already_indexed(conn, name):
+        if already_indexed(conn, name, source):
+            print(f"{prefix} Already indexed -- {name}")
             skipped += 1
             continue
 
-        print(f"[{i+1}/{len(all_pdfs)}] {name} ({source})", flush=True)
-        print(f"  Downloading...", end=" ", flush=True)
-        try:
-            pdf_bytes = download_drive_file(service, pdf_file["id"])
-        except Exception as e:
-            print(f"FAILED ({e})")
-            continue
+        print(f"{prefix} [{source}] {name}", flush=True)
+        n = index_pdf(conn, pdf_path, source)
 
-        print(f"indexing...", end=" ", flush=True)
-        n_chunks = index_pdf(conn, pdf_bytes, name, source)
-        print(f"{n_chunks} chunks.")
-        indexed += 1
+        if n == 0:
+            print(f"  -> 0 chunks (image-only or unreadable PDF)")
+            errors += 1
+        else:
+            print(f"  -> {n} chunks")
+            indexed += 1
 
     conn.close()
-    print(f"\nDone. {indexed} PDFs indexed, {skipped} already in DB.")
-    print(f"Database: {DB_PATH}")
+
+    size_mb = db_path.stat().st_size / 1e6
+    print(f"\n{'='*55}")
+    print(f"Done.")
+    print(f"  Indexed  : {indexed} PDFs")
+    print(f"  Skipped  : {skipped} (already indexed or blacklisted)")
+    print(f"  Errors   : {errors} (image-only or unreadable)")
+    print(f"  DB size  : {size_mb:.1f} MB")
+    print(f"  DB path  : {db_path}")
 
 
 if __name__ == "__main__":
