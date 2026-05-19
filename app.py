@@ -27,7 +27,7 @@ if _env_file.exists():
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
-DB_PATH = Path(__file__).parent / "commentary.db"
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "commentary.db")))
 MODEL = "claude-sonnet-4-6"
 MAX_HISTORY = 10
 FTS_TOP_N = 20
