@@ -1,0 +1,89 @@
+@import "tailwindcss";
+
+:root {
+  --color-paper: #fcfcfb;
+  --color-paper-muted: #f3f3f0;
+  --color-ink: #17181a;
+  --color-ink-muted: #55585e;
+  --color-accent: #1e3a5f;
+  --color-accent-soft: #e8edf3;
+  --color-line: #e2e1dd;
+}
+
+@theme inline {
+  --color-paper: var(--color-paper);
+  --color-paper-muted: var(--color-paper-muted);
+  --color-ink: var(--color-ink);
+  --color-ink-muted: var(--color-ink-muted);
+  --color-accent: var(--color-accent);
+  --color-accent-soft: var(--color-accent-soft);
+  --color-line: var(--color-line);
+
+  --font-display: var(--font-space-grotesk);
+  --font-body: var(--font-ibm-plex-sans);
+
+  --text-display: 3.5rem;
+  --text-display--line-height: 1.05;
+  --text-display--letter-spacing: -0.01em;
+  --text-h2: 2rem;
+  --text-h2--line-height: 1.2;
+  --text-h3: 1.5rem;
+  --text-h3--line-height: 1.3;
+  --text-body-lg: 1.125rem;
+  --text-body-lg--line-height: 1.7;
+  --text-meta: 0.875rem;
+  --text-meta--line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: #15171a;
+    --color-paper-muted: #1c1f23;
+    --color-ink: #edeeee;
+    --color-ink-muted: #9a9ea5;
+    --color-accent: #7fa5cf;
+    --color-accent-soft: #202b38;
+    --color-line: #2b2e33;
+  }
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+}
+
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Visible keyboard focus everywhere — never rely on the browser default alone. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+    color: #000;
+  }
+}
