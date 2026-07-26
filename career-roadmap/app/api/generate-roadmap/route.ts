@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { anthropic, MODELS } from "@/lib/anthropic";
 import { buildSystemPrompt, PROMPT_VERSION } from "@/lib/prompts/roadmap-system";
 import { buildUserPrompt } from "@/lib/prompts/roadmap-user";
@@ -106,6 +106,11 @@ export async function POST(req: NextRequest) {
   const userPrompt = buildUserPrompt(resumeText, jds, answers);
   const encoder = new TextEncoder();
 
+  // Shared between start()/cancel() so a client disconnect can abort the
+  // in-flight Anthropic call instead of letting it run to completion.
+  let anthropicStreamRef: ReturnType<typeof anthropic.messages.stream> | null = null;
+  let streamClosed = false;
+
   const stream = new ReadableStream({
     async start(controller) {
       let fullText = "";
@@ -118,36 +123,50 @@ export async function POST(req: NextRequest) {
           ],
           messages: [{ role: "user", content: userPrompt }],
         });
+        anthropicStreamRef = anthropicStream;
 
         anthropicStream.on("text", (delta) => {
           fullText += delta;
+          if (streamClosed) return;
           controller.enqueue(encoder.encode(delta));
         });
 
         await anthropicStream.finalMessage();
+        streamClosed = true;
         controller.close();
 
-        // Analytics, after the stream has fully closed. This is the only
-        // point with access to resumeText/jds/fullText — recordAnalyticsInBackground
-        // never persists them, only the short derived fields it produces.
-        // Failures here must never surface to the client; the response has
-        // already been sent.
-        recordAnalyticsInBackground({
-          jds,
-          answers,
-          fullRoadmapText: fullText,
-          promptVersion: PROMPT_VERSION,
-          email,
-        }).catch((e) => console.error("[analytics] failed to record run", e));
-      } catch (err) {
-        console.error("[generate-roadmap] generation failed", err);
-        controller.enqueue(
-          encoder.encode(
-            "\n\n[Something went wrong generating your roadmap. Please try again.]",
-          ),
+        // Scheduled via after() so it survives past the response being sent —
+        // the function can otherwise be torn down the moment the stream
+        // finishes. This is the only point with access to resumeText/jds/
+        // fullText; recordAnalyticsInBackground never persists them, only
+        // the short derived fields it produces.
+        after(() =>
+          recordAnalyticsInBackground({
+            jds,
+            answers,
+            fullRoadmapText: fullText,
+            promptVersion: PROMPT_VERSION,
+            email,
+          }).catch((e) => console.error("[analytics] failed to record run", e)),
         );
-        controller.close();
+      } catch (err) {
+        if (streamClosed) {
+          // Client disconnected — cancel() already aborted the Anthropic
+          // call and closed things down; this rejection is expected, not
+          // a real failure.
+          return;
+        }
+        console.error("[generate-roadmap] generation failed", err);
+        streamClosed = true;
+        controller.error(err instanceof Error ? err : new Error(String(err)));
       }
+    },
+    cancel() {
+      // The user closed the tab or navigated away mid-generation — stop
+      // the Anthropic call instead of letting it run (and bill) to
+      // completion for output nobody will read.
+      streamClosed = true;
+      anthropicStreamRef?.abort();
     },
   });
 

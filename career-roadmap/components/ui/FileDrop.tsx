@@ -26,7 +26,15 @@ export function FileDrop({ label, accept, value, onChange, error, placeholder }:
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-ink">{label}</span>
+        {mode === "text" ? (
+          <label htmlFor={textId} className="text-sm font-medium text-ink">
+            {label}
+          </label>
+        ) : (
+          // The file-upload branch below is its own <label htmlFor={fileId}>,
+          // so this stays a plain span to avoid double-labeling that input.
+          <span className="text-sm font-medium text-ink">{label}</span>
+        )}
         <div className="flex gap-1 text-meta">
           <button
             type="button"

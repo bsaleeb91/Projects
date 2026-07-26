@@ -1,23 +1,27 @@
 @import "tailwindcss";
 
+/* Raw palette values, named distinctly from the --color-* theme tokens below
+   so the mapping in @theme inline isn't a same-named self-reference (it
+   still worked before — the real values happened to land later in cascade
+   order — but that was fragile and confusing to read). */
 :root {
-  --color-paper: #fcfcfb;
-  --color-paper-muted: #f3f3f0;
-  --color-ink: #17181a;
-  --color-ink-muted: #55585e;
-  --color-accent: #1e3a5f;
-  --color-accent-soft: #e8edf3;
-  --color-line: #e2e1dd;
+  --paper: #fcfcfb;
+  --paper-muted: #f3f3f0;
+  --ink: #17181a;
+  --ink-muted: #55585e;
+  --accent: #1e3a5f;
+  --accent-soft: #e8edf3;
+  --line: #e2e1dd;
 }
 
 @theme inline {
-  --color-paper: var(--color-paper);
-  --color-paper-muted: var(--color-paper-muted);
-  --color-ink: var(--color-ink);
-  --color-ink-muted: var(--color-ink-muted);
-  --color-accent: var(--color-accent);
-  --color-accent-soft: var(--color-accent-soft);
-  --color-line: var(--color-line);
+  --color-paper: var(--paper);
+  --color-paper-muted: var(--paper-muted);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-line: var(--line);
 
   --font-display: var(--font-space-grotesk);
   --font-body: var(--font-ibm-plex-sans);
@@ -37,13 +41,13 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-paper: #15171a;
-    --color-paper-muted: #1c1f23;
-    --color-ink: #edeeee;
-    --color-ink-muted: #9a9ea5;
-    --color-accent: #7fa5cf;
-    --color-accent-soft: #202b38;
-    --color-line: #2b2e33;
+    --paper: #15171a;
+    --paper-muted: #1c1f23;
+    --ink: #edeeee;
+    --ink-muted: #9a9ea5;
+    --accent: #7fa5cf;
+    --accent-soft: #202b38;
+    --line: #2b2e33;
   }
 }
 
