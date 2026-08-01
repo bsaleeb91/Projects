@@ -25,7 +25,7 @@ export function FileDrop({ label, accept, value, onChange, error, placeholder }:
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         {mode === "text" ? (
           <label htmlFor={textId} className="text-sm font-medium text-ink">
             {label}

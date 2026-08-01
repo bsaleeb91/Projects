@@ -27,9 +27,11 @@ export function ResultsStep({ text }: { text: string }) {
             {section.heading && (
               <h3 className="font-display text-h3 text-ink">{section.heading}</h3>
             )}
-            <div className="whitespace-pre-wrap text-body-lg text-ink">
-              {renderInlineBold(section.body)}
-            </div>
+            {section.body && (
+              <div className="whitespace-pre-wrap text-body-lg text-ink">
+                {renderInlineBold(section.body)}
+              </div>
+            )}
           </section>
         ))}
       </article>

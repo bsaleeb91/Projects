@@ -55,7 +55,8 @@ export function UploadStep({
           <div key={i} className="flex flex-col gap-2 rounded-md border border-line p-4">
             <input
               type="text"
-              placeholder={`JD ${i + 1} name (optional) — e.g. "Director of Strategy — Acme"`}
+              aria-label={`Job Description ${i + 1} name (optional)`}
+              placeholder='Optional name, e.g. "Director of Strategy"'
               value={jds[i].name}
               onChange={(e) => onJDNameChange(i, e.target.value)}
               className="w-full border-b border-line bg-transparent pb-2 text-sm text-ink outline-none placeholder:text-ink-muted"

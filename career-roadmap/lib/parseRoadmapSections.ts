@@ -1,6 +1,6 @@
 export type RoadmapSection = { heading: string; body: string };
 
-const HEADING_RE = /^#{1,6}\s+(.+)$/;
+const HEADING_RE = /^\s*#{1,6}\s+(.+)$/;
 
 /**
  * Splits the model's markdown-style output (it's instructed to use
