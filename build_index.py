@@ -84,6 +84,11 @@ def init_db(conn: sqlite3.Connection):
             INSERT INTO chunks_fts(rowid, source, filename, chunk_text)
             VALUES (new.id, new.source, new.filename, new.chunk_text);
         END;
+
+        -- Without this, `SELECT DISTINCT source FROM chunks` (app.py's
+        -- get_sources, used to populate the sidebar) does a full table scan
+        -- of every chunk -- 37s measured on the 751MB/196K-row production DB.
+        CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
     """)
     conn.commit()
 
