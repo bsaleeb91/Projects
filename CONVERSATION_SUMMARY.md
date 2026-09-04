@@ -52,28 +52,69 @@ C:\Users\17165\OneDrive\Documents\Claude\Personal\Agents\
 6. Splits into ~500-word chunks with 50-word overlap
 7. Stores in SQLite FTS5 (`commentary.db`) with source, filename, page number
 
-### app.py — Query Flow (rewritten 2026-08-24)
-1. User types question + optionally selects a source filter
-2. **Single Claude call** generates FTS search keywords only — there is no
-   longer a "Claude guesses relevant filenames" step. That step used to guess
-   from filenames alone before seeing any content, which both missed sources
-   and silently dropped any source whose name Claude didn't reproduce
-   character-for-character.
+### app.py — Query Flow (rewritten 2026-08-24, extended 2026-09-03)
+1. User types question + optionally selects a source filter and a search depth
+2. **Single Claude call** (`generate_query_plan()`) returns both FTS search
+   keywords **and** a depth classification. There is no longer a "Claude
+   guesses relevant filenames" step — that used to guess from filenames alone
+   before seeing any content, which both missed sources and silently dropped
+   any source whose name Claude didn't reproduce character-for-character.
+   Depth rides along on this existing call, so classification costs no extra
+   request and no extra latency; an unparseable reply falls back to Standard
+   rather than silently costing 4x.
 3. **SQLite FTS5**, scoped to the `chunk_text` column only (an earlier bug let
    an unqualified `MATCH` also match the `source`/`filename` columns, so a
    keyword like "Chrysostom" pulled in that entire source by name rather than
    by content). One windowed query returns each source's top candidates using
    `rank MATCH 'bm25(0.0, 0.0, 1.0)'` (bm25 can't run inside a window function
    directly, so the weights are set this way instead).
-4. **Gate + guaranteed floor + merit fill** in Python (`select_diverse()`)
-   picks up to 150 chunks total: any source that clears a relevance gate gets
-   a guaranteed floor of a few excerpts, the rest is filled by merit with a
-   per-source cap so no single source can dominate. Exact-duplicate chunk text
-   (front-matter/boilerplate pages) is deduped and backfilled.
-5. Claude Sonnet 5 streams the answer with citations, instructed to synthesize
-   across sources thematically rather than walk through excerpts in order.
-6. **Sources used expander** shows every excerpt, grouped by source, so the
+4. **Gate + guaranteed passage + merit fill** in Python (`select_passages()`).
+   Any source clearing the relevance gate is guaranteed one *anchor* chunk
+   expanded by `PASSAGE_RADIUS` neighbours into a contiguous passage — the unit
+   of the floor is a passage, not a lone excerpt, because a chunk is roughly
+   one page here and usually cuts mid-argument. Expansion is clipped to the
+   anchor's own `(source, filename)`: chunks are inserted in document order, so
+   consecutive ids are consecutive text of the same PDF (verified — ids
+   5000-5008 are pages 234-242 of one volume), but `filename` alone is not
+   unique across sources. The rest is filled by merit, with no source allowed
+   more than `MAX_SOURCE_SHARE` of the budget. Exact-duplicate chunk text
+   (front-matter/boilerplate) is deduped and backfilled.
+5. `format_context()` merges contiguous chunks into one passage block and
+   strips the words that overlap between them. The overlap is **measured, not
+   assumed**: `build_index.py` chunks each page separately, so consecutive ids
+   overlap only within a page and share nothing across a page boundary —
+   stripping a fixed 50 words would eat real text at every page break.
+6. Claude Sonnet 5 streams the answer with citations, instructed to quote the
+   fathers directly and to name them where an excerpt identifies one. At Deep
+   it is additionally told to answer in proportion to the material rather than
+   summarising it — without that it applies one-verse-lookup compression to a
+   150-excerpt thematic question.
+7. **Sources used expander** shows every excerpt, grouped by source, so the
    user can verify what the model had to work with.
+
+### Search depth (added 2026-09-03)
+
+Cost is close to linear in excerpts sent, and most questions are single-verse
+lookups that don't need the full budget.
+
+| Depth | Excerpts | `gate_ratio` | Input tokens | ~Input cost |
+|-------|----------|--------------|--------------|-------------|
+| Standard | 40 | 0.45 | ~21K | ~$0.042 |
+| Deep | 150 | 0.35 | ~75K | ~$0.150 |
+
+Sidebar offers `Auto` (default), `Standard`, `Deep`. Auto sends single-verse
+lookups to Standard and thematic/doctrinal/comparative questions to Deep.
+
+`gate_ratio` is the fraction of the corpus-best score a source must reach to
+earn a guaranteed passage — **higher = stricter = fewer sources**. Measured on
+"John 3:16": 0.30 → 16 sources qualify, 0.35 → 13, 0.40 → 11, 0.50 → 5,
+0.60 → 3, 0.70 → 1. Standard gates harder on purpose: at a 40-chunk budget it
+is better to quote 7-8 fathers coherently than to scatter 40 orphan fragments
+across 18 of them.
+
+Measured live 2026-09-03: "give me the commentary for John 3:16" → 40 excerpts
+from **13 sources** (Standard); "Does God love me more than I love myself?" →
+150 excerpts from **17 sources** (Deep).
 
 **Why this changed**: the flat "top 20 by rank" approach let whichever source
 happened to be most verse-indexed take 15–20 of 20 slots on a typical question,
@@ -83,9 +124,15 @@ before/after on "What does John 3:16 mean?".
 
 ### Source Filters
 Sidebar multiselect over all 37 sources. Leave blank to search the whole
-corpus (gate/floor/merit selection decides what's relevant). Select one or
+corpus (gate/passage/merit selection decides what's relevant). Select one or
 more to restrict retrieval to exactly those sources. Select 2+ and toggle
 **Compare** to get a structured side-by-side instead of a blended answer.
+
+Note that a "source" is a top-level folder, which mixes individual authors
+(`John Chrysostom`, `Cyril of Alexandria`) with whole collections (`Nicene and
+Post-Nicene Fathers` = 58,955 chunks across 39 volumes, each volume a different
+father). Selecting NPNF therefore selects dozens of fathers at once, and a
+citation naming it does not say who is speaking. See ROADMAP.md P1.
 
 ### Conversation Memory
 Last 10 turns kept in Claude's context. Older messages dropped to control costs.
@@ -146,7 +193,11 @@ BLACKLIST = {
 | `.gitignore` had `*.txt` which blocked `requirements.txt` | Fixed to explicitly list secret files instead |
 | *(retired)* `commentary.db` exceeded GitHub's 100MB limit | Originally handled via Git LFS; superseded — the DB now lives entirely on a Render persistent disk (`DB_PATH`) and is gitignored, not committed at all |
 | Flat `ORDER BY rank LIMIT 20` let one verse-indexed source take 15-20 of 20 slots, leaving 30+ of 37 sources unrepresented | Rewrote retrieval (2026-08-24): FTS scoped to `chunk_text` only (was also matching `source`/`filename` columns), plus gate/floor/merit selection across 150 chunks — see Query Flow above |
-| `get_sources()` (`SELECT DISTINCT source FROM chunks`) took 37s on the 751MB DB — full table scan, no index on `source` — blocking the whole UI behind a spinner on every cold start | Added `CREATE INDEX idx_chunks_source ON chunks(source)` (2026-08-24, both to the live DB and to `build_index.py`'s schema so future rebuilds get it too). Query now takes ~0.03s |
+| `get_sources()` (`SELECT DISTINCT source FROM chunks`) took 37s on the 751MB DB — full table scan, no index on `source` — blocking the whole UI behind a spinner on every cold start | Added `CREATE INDEX idx_chunks_source ON chunks(source)` to `build_index.py`'s schema so future rebuilds get it. **Unconfirmed on the live Render DB** — a 2026-09-03 cold start still sat on `Running get_sources(...)` for ~30-40s, so the index may never have been applied there. `build_index.py` only affects future builds, not the file already on the persistent disk. Verify and apply directly if missing |
+| **The whole 2026-08-24 retrieval overhaul was never deployed.** It sat uncommitted in the working tree until 2026-09-03, while `main` — and therefore Render — stayed on `99b7b79`. Production ran the flat `ORDER BY rank LIMIT 20` retrieval, the unscoped `MATCH` bug, and the filename-guessing pre-filter the entire time | Committed and pushed 2026-09-03 (`dc86807`). Any judgement about retrieval quality formed before that date was formed against the *old* code |
+| Every question asked without a source filter returned "No matching content found" despite retrieval succeeding — the default branch assigned `all_rows` but never built `context` from it, unlike the compare and selected-source branches, so `context` stayed `""` and the answer step was skipped | Fixed 2026-09-03 (`dab4e86`). Caught by a live test: John 3:16 selected 150 excerpts across 18 sources and discarded all of them |
+| One commentary took 65% of the budget at Standard depth. `dominance_cap` was `(cap // n_qualified) * 2` — derived from how many sources cleared the gate, so a *stricter* gate left fewer qualifiers and made the per-source allowance *larger*. On "John 3:16" a 0.60 gate admitted 3 sources, setting the allowance to 26 of 40 slots | Replaced with `MAX_SOURCE_SHARE` (0.25), a fixed fraction of the budget independent of the gate (2026-09-03, `8052338`). Same query then returned 11 sources with a 27% maximum |
+| Deep retrieved ~4x the excerpts but the answer stayed the same length — the system prompt was identical at both depths and told the model to "prefer breadth over repeating one source at length", so it surveyed 17 sources in two paragraphs | Deep now asks for a treatment proportional to the material; the base prompt also asks for direct quotation and for naming the father (2026-09-03, `988a4a5`) |
 
 ---
 
@@ -199,19 +250,35 @@ streamlit
 
 ---
 
-## V2 Considerations
+## Cost
 
-- **Hallucination**: Can't be fully prevented with prompting. The Sources expander lets users verify. Better retrieval = less hallucination. Consider Files API for small PDFs.
-- **OCR for image-only PDFs**: `049 Ephesians.pdf` has no text layer. Adobe Acrobat can OCR it; replace the Drive file and re-run `build_index.py`.
-- **Password protection**: The app URL is public. Add Streamlit's built-in auth if you want to restrict access.
-- **Cost controls**: retrieval now sends ~150 chunks (~65K tokens) per question instead of 20
-  (~8.6K), roughly a 5-7x cost increase per question (~$0.20/question vs. ~$0.03-0.05 before,
-  on Sonnet). Watch actual usage after this change; a sidebar depth selector (Standard/Deep/
-  Exhaustive mapping to fewer/more chunks) is the mitigation if cost becomes a concern.
-- **Upgrade Render**: Move to Starter ($7/mo) to eliminate cold start for regular users, if not
-  already on it (a persistent disk plan is required for `commentary.db` regardless).
-- **Semantic search (not yet built)**: FTS5 is purely lexical — a question about "theosis" misses
-  commentary that only says "deification". Adding an embedding-based vector index (fused with
-  BM25 via reciprocal rank fusion) is the next quality ceiling to address, but it requires
-  re-indexing all 196,608 chunks and a plan for getting the larger DB onto the Render persistent
-  disk — bigger scope than the 2026-08-24 retrieval rewrite, deliberately deferred.
+Roughly linear in excerpts sent. Sonnet 5 is $2/MTok input, $10/MTok output.
+
+| | Input | Output | Total |
+|---|---|---|---|
+| Standard (40 excerpts) | ~$0.042 | ~$0.01-0.02 | **~$0.05** |
+| Deep (150 excerpts) | ~$0.150 | ~$0.03-0.05 | **~$0.20** |
+
+Auto depth keeps routine lookups at the Standard price and spends the larger
+budget only on thematic questions. Prompt caching does **not** help here — the
+excerpts are unique per question, so there is no reusable prefix.
+
+## What's next
+
+Planning has moved to **`ROADMAP.md`**, which is prioritized and carries the
+measured evidence behind each item. Summary of where things stand:
+
+- **Done since this doc was written**: depth presets + auto-selection,
+  passage-based retrieval floor, the dominance-cap fix, answer depth matched to
+  retrieval depth, direct quotation of the fathers.
+- **The two structural problems** (ROADMAP P1, P2): "source" is a folder, not a
+  father, so ~46% of the corpus carries no author attribution and no father gets
+  a retrieval floor of his own; and 80%+ of NPNF chunks contain no verse
+  reference of any form, making them unreachable by reference keywords. Both
+  need an indexing pass to fix.
+- **Still purely lexical** (ROADMAP P3): FTS5 can't serve thematic questions
+  well — "theosis" misses commentary that only says "deification". Semantic
+  retrieval is the remaining quality ceiling and requires re-embedding all
+  196,608 chunks.
+- Also open: OCR for image-only PDFs, an eval set, query logging, a shared
+  password, and the Render tier. See ROADMAP.md.

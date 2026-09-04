@@ -9,6 +9,42 @@ Architecture background: `CONVERSATION_SUMMARY.md`.
 
 ---
 
+## Shipped 2026-09-03
+
+Before planning further, note what changed the day this roadmap was written —
+including two bugs that mean **any earlier judgement about retrieval quality
+was formed against code that wasn't running what you thought it was**.
+
+- **The 2026-08-24 retrieval overhaul was never deployed.** It sat uncommitted
+  while `main` — and therefore Render — stayed on `99b7b79`. Production ran the
+  flat `ORDER BY rank LIMIT 20`, the unscoped `MATCH` bug, and the
+  filename-guessing pre-filter the whole time. Committed and pushed (`dc86807`).
+- **Every unfiltered question returned "No matching content found"** — the
+  default branch never built `context`, so retrieval succeeded and the result
+  was discarded. Fixed (`dab4e86`).
+- **One source took 65% of the budget at Standard depth.** `dominance_cap` was
+  derived from the qualifying-source count, so a stricter gate produced a
+  *larger* per-source allowance. Replaced with a fixed budget share (`8052338`).
+- **Depth presets** — Standard (40 excerpts, ~$0.05) / Deep (150, ~$0.20),
+  auto-selected on the existing keyword call, with a sidebar override.
+- **Passage-based floor** — a qualifying source is guaranteed a contiguous
+  passage (anchor + neighbours), not N loose chunks; contiguous runs are merged
+  and de-overlapped in `format_context()`.
+- **Answer depth matched to retrieval depth**, plus direct quotation of the
+  fathers and naming them where an excerpt identifies one (`988a4a5`).
+
+**Measured after all of the above:** "give me the commentary for John 3:16" →
+40 excerpts from **13 sources** at Standard; "Does God love me more than I love
+myself?" → 150 excerpts from **17 sources** at Deep.
+
+> **Re-baseline before doing more retrieval work.** The reported symptom —
+> "it's missing some church fathers" — was observed against the old flat top-20
+> retrieval. P1 and P2 below remain true regardless, because they are facts
+> about the *data*. But how bad retrieval actually is now is an open question,
+> and N1 should answer it before N2/N3/N4 are worth building.
+
+---
+
 ## The three real problems
 
 ### P1. The app has no concept of a church father
@@ -108,6 +144,12 @@ Deliberately short. Everything else is in the backlog appendix.
   cannot reach the 80% of NPNF that carries no reference at all (that's X3).
 - **N4. Reference-aware gate loosening.** When the question names a specific
   verse (regex is enough), raise `CANDIDATE_K` and lower `GATE_RATIO`.
+  **Now in tension with depth**: verse questions are classified `simple` and so
+  get Standard's *stricter* 0.45 gate, to keep them cheap — the opposite of
+  what this item proposed. The live John 3:16 result (13 sources) suggests the
+  tension is currently benign, so treat N4 as "revisit only if N1 shows verse
+  questions are still losing fathers", and price any loosening against the
+  ~$0.05 target before shipping it.
 - **N5. Small eval + query log.** 10-15 questions split across P2/P3 classes,
   scored by hand, plus logging of every real question (text, keywords, sources
   retrieved, latency, cost). Intentionally small — enough to catch a regression,
@@ -208,6 +250,12 @@ Real, just not now. One line each so they stop competing for attention.
   `build_index.py` logs as 0 chunks — currently 100% invisible); decide whether
   `Studia Patristica` (modern secondary literature) should compete for slots
   with primary patristic commentary.
+- **Check `idx_chunks_source` on the live DB** (do this one first — it's a
+  one-liner). A 2026-09-03 cold start sat ~30-40s on `Running get_sources(...)`,
+  the signature of the un-indexed full table scan. `build_index.py` carries the
+  index for *future* rebuilds; it does nothing to the file already on the Render
+  disk. `CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source)` against
+  the deployed DB turns every cold start from ~40s into near-instant.
 - **Ops**: incremental/resumable re-index; DB schema versioning; post-deploy
   smoke check; repo tidy (`debug_*.py` at root, unrelated agents sharing the repo).
 - **Back up the source PDFs.** The 551 curated PDFs are the one genuinely
@@ -244,6 +292,26 @@ Measured facts, so future work doesn't re-derive them.
   pages polluting retrieval (0 of 4,000 NPNF chunks had ≥15 verse-like refs).
   Extraction quality reads clean; only minor page-number bleed into body text
   (e.g. a chunk starting `523 to deliver us...`). Not worth chasing.
+- **2026-09-03** — Gate calibration on "John 3:16" (`global_best` -41.1, 35
+  sources with candidates). Sources qualifying by `gate_ratio`: 0.20 → 19,
+  0.30 → 16, 0.35 → 13, 0.40 → 11, 0.50 → 5, 0.60 → 3, 0.70 → 1. Higher ratio
+  = stricter. Standard now uses 0.45, Deep 0.35.
+- **2026-09-03** — Post-fix retrieval, same query: Standard 40 excerpts / 11
+  sources / 27% max source share / ~$0.042 input (offline); live run gave 13
+  sources. Deep 150 excerpts / 17 sources / 25% max share / ~$0.150 input,
+  matching live.
+- **2026-09-03** — Chunk ids are document-ordered: ids 5000-5008 are pages
+  234-242 of one volume, and `filename` changes only 194 times across the first
+  50,000 ids. Neighbour expansion by id therefore works with **no re-index** —
+  but must be clipped by `(source, filename)`, since `build_index.py` indexes
+  same-named files under different sources.
+- **2026-09-03** — `build_index.py` chunks each page separately, so consecutive
+  ids overlap only *within* a page and share nothing across a page boundary.
+  Overlap must be measured, not assumed at a fixed 50 words.
+- **2026-09-03** — Live cold start still sat on `Running get_sources(...)` for
+  ~30-40s, suggesting `idx_chunks_source` was never applied to the Render disk
+  copy of the DB (the `build_index.py` change only affects future rebuilds).
+  Unconfirmed — worth checking directly.
 - **2026-09-03** — Anthropic exposes no first-party embeddings endpoint;
   semantic search requires a third-party or local model either way.
 - Current pricing: Sonnet 5 $2/$10 per MTok, Opus 5 $5/$25, Haiku 4.5 $1/$5;
@@ -266,6 +334,19 @@ Measured facts, so future work doesn't re-derive them.
   stateful propagating tagger, after measuring that 80%+ of NPNF chunks contain
   no reference to detect. Citation-format expansion (N3) narrowed from blanket
   to source-scoped on the same evidence.
+- **2026-09-03** — Cost target set at ~$0.05/question for routine lookups,
+  escalating to ~$0.20 only for thematic questions. Implemented as two depth
+  presets classified on the existing keyword call rather than a manual-only
+  selector, so the default path is cheap without the user having to think about
+  it. Ambiguous classification falls back to the *cheaper* depth deliberately.
+- **2026-09-03** — Per-source dominance cap decoupled from the gate. Deriving
+  it from the qualifying count made the two mechanisms fight: stricter gate →
+  fewer qualifiers → larger allowance → worse domination. It is now a fixed
+  share of the budget (`MAX_SOURCE_SHARE`).
+- **2026-09-03** — Retrieval floor's unit changed from "N chunks" to "one
+  contiguous passage". Raising a chunk floor from 1 to 2 was considered and
+  rejected: two independent BM25 hits from one source can come from different
+  volumes, so more chunks would have meant more fragments, not more coherence.
 
 ## Keeping this honest
 
