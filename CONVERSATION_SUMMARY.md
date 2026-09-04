@@ -31,11 +31,17 @@ All API calls use **Claude Sonnet 5** (`claude-sonnet-5`).
 
 ### File Locations on Windows
 ```
-C:\Users\17165\OneDrive\Documents\Claude\Personal\Agents\
+C:\Users\17165\Projects\
 ```
+(An earlier version of this doc pointed at
+`C:\Users\17165\OneDrive\Documents\Claude\Personal\Agents\`, which is not where
+the git repo lives. Corrected 2026-09-03.)
 
 ### GitHub
-- **Repo**: `bsaleeb91/projects` — branch `main`
+- **Repo**: `bsaleeb91/Projects` — branch `main`
+  (GitHub reports the old lowercase `projects` remote as moved; redirects still
+  work, but `git remote set-url origin https://github.com/bsaleeb91/Projects.git`
+  silences the warning)
 - **`commentary.db`** is gitignored — it lives on a **Render persistent disk**, not in the
   repo and not in Git LFS (an earlier LFS setup was retired; see `DB_PATH` below)
 
@@ -205,9 +211,23 @@ BLACKLIST = {
 
 ### Windows — initial setup / after pulling fresh
 ```powershell
-cd "C:\Users\17165\OneDrive\Documents\Claude\Personal\Agents"
+cd "C:\Users\17165\Projects"
 pip install anthropic google-api-python-client google-auth-oauthlib pymupdf streamlit
 ```
+
+### Run the app locally
+`app.py` reads `ANTHROPIC_API_KEY` from the environment, falling back to a
+`.env` file **at the repo root**. As of 2026-09-03 there is no `.env` there and
+the variable is not set in the shell, so a bare `streamlit run app.py` will
+fail on the first question. Either set it per session:
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+streamlit run app.py
+```
+or create `C:\Users\17165\Projects\.env` containing `ANTHROPIC_API_KEY=sk-ant-...`
+(`.env` is gitignored). The key is already set in Render's environment variables
+if you need to copy it. `commentary.db` is present locally (~757MB), so no other
+setup is required.
 
 ### Build the index (1–2 hrs, run when PDFs change)
 ```powershell
