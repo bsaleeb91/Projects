@@ -12,3 +12,8 @@ commentary.db
 # Python
 __pycache__/
 *.pyc
+
+# Separate projects that happen to live under this directory but are not part
+# of this repo
+smsa-website/
+smsa-website-handoff/
