@@ -489,6 +489,7 @@ if question := st.chat_input("Ask a question about the Bible..."):
             # All sources -- gate/floor/merit selection decides what's relevant
             # by content, not by Claude guessing from filenames.
             all_rows = fts_search(conn, keywords, sources=None, cap=RETRIEVAL_CAP)
+            context = format_context(all_rows)
             n_sources = len({row["source"] for row in all_rows})
             status.write(f"{len(all_rows)} excerpts from {n_sources} sources")
 
