@@ -34,21 +34,43 @@ MODEL = "claude-sonnet-5"
 MAX_HISTORY = 10
 
 # -- Retrieval tuning -----------------------------------------------------------
-# RETRIEVAL_CAP: total excerpts fed to the model per question. ~150 chunks is
-# ~65K tokens -- comfortable inside the model's 1M context window.
-# CANDIDATE_K: per-source candidates pulled from SQL before Python does
-# gate/floor/merit selection (cheap -- fetching more candidates costs ~nothing).
-# FLOOR_PER_SOURCE: guaranteed excerpts for any source that clears the gate.
-# GATE_RATIO: a source qualifies for the floor only if its best match score is
-# within this fraction of the single best match across the whole corpus.
-# Without a gate, a flat per-source floor spends most of the budget forcing in
-# sources that have nothing relevant to say (e.g. a source with 8 total chunks
-# on a question about John 3:16) -- see the retrieval-overhaul plan for the
-# measurements behind these numbers.
-RETRIEVAL_CAP = 150
+# Two depths, because cost is close to linear in the number of excerpts sent:
+# ~150 chunks is ~65K input tokens (~$0.20/question on Sonnet 5), while ~40 is
+# ~17K (~$0.055). Most questions are single-verse lookups that don't need the
+# larger budget, so Standard is the default and Deep is reserved for thematic,
+# doctrinal, or comparative questions that genuinely draw on many fathers.
+#
+# `gate_ratio`: a source qualifies for a guaranteed passage only if its best
+# match is within this fraction of the single best match corpus-wide. Higher
+# ratio = stricter gate = fewer sources. Standard gates harder on purpose: at a
+# 40-chunk budget it is better to quote 6-8 fathers coherently than to spread
+# 40 orphan fragments across 18 of them.
+DEPTH_PRESETS = {
+    "Standard": {"cap": 40, "gate_ratio": 0.45},
+    "Deep": {"cap": 150, "gate_ratio": 0.35},
+}
+
+# No single source may take more than this share of the budget during merit
+# fill. This is deliberately a fraction of `cap` and NOT a function of how many
+# sources cleared the gate: deriving it from the qualifying count made the gate
+# and the cap fight each other -- a stricter gate left fewer qualifiers, which
+# made the per-source allowance *larger*. Measured on "John 3:16", a 0.60 gate
+# admitted 3 sources, which set the old allowance to 26 of 40 slots and let one
+# commentary take 65% of the budget.
+MAX_SOURCE_SHARE = 0.25
+DEFAULT_DEPTH = "Standard"  # also the fallback when depth classification fails
+
+# Per-source candidates pulled from SQL before Python selects (cheap -- fetching
+# more candidates costs ~nothing).
 CANDIDATE_K = 40
-FLOOR_PER_SOURCE = 2
-GATE_RATIO = 0.35
+
+# A qualifying source is guaranteed one *anchor* chunk expanded by this many
+# neighbours on each side. A single chunk is roughly one page here and usually
+# cuts mid-argument, so the unit of the floor is a contiguous passage rather
+# than a lone excerpt. Raising the old per-source floor from 1 to 2 would not
+# have fixed that: two independent BM25 hits from one source can come from
+# different volumes entirely.
+PASSAGE_RADIUS = 1
 
 
 # -- Data helpers --------------------------------------------------------------
@@ -82,36 +104,63 @@ def get_sources(_conn) -> list[str]:
 
 # -- Claude calls --------------------------------------------------------------
 
-def generate_keywords(
+def generate_query_plan(
     client: anthropic.Anthropic,
     question: str,
-) -> list[str]:
-    """Generate FTS keywords for the question.
+) -> tuple[list[str], str]:
+    """Generate FTS keywords and a retrieval depth for the question.
 
-    There is no source pre-filter step anymore -- Claude was previously asked to
-    guess relevant sources from filenames alone, before seeing any content. That
-    both missed sources it guessed wrong on and silently dropped any source whose
+    Depth rides along on the keyword call rather than being a second request:
+    this call already runs for every question, so classifying here costs no
+    extra latency and no extra money.
+
+    There is no source pre-filter step -- Claude was previously asked to guess
+    relevant sources from filenames alone, before seeing any content. That both
+    missed sources it guessed wrong on and silently dropped any source whose
     name it didn't reproduce character-for-character. Retrieval now always
-    searches the full corpus and lets `select_diverse()` pick sources by what
+    searches the full corpus and lets `select_passages()` pick sources by what
     they actually contain.
     """
     response = client.messages.create(
         model=MODEL,
-        max_tokens=128,
+        max_tokens=200,
         messages=[{
             "role": "user",
             "content": (
                 f'Question: "{question}"\n\n'
-                "Generate search keywords for a full-text search of Bible commentaries. "
+                "Respond with exactly two lines and nothing else:\n"
+                "DEPTH: simple or complex\n"
+                "KEYWORDS: comma-separated search keywords\n\n"
+                "DEPTH is \"simple\" for a lookup about one specific verse or a "
+                "short passage. DEPTH is \"complex\" for thematic, doctrinal, "
+                "pastoral or comparative questions, anything spanning multiple "
+                "passages, and anything asking what several fathers say.\n\n"
+                "KEYWORDS are for a full-text search of Bible commentaries. "
                 "Include verse references AND synonyms/related terms. "
                 "Prefer specific phrases over bare numbers -- write \"John 3:16\", "
-                "never a bare \"3:16\" (it matches unrelated footnote citations). "
-                "Respond with ONLY a comma-separated list of keywords, nothing else.\n"
-                "Example: John 3:16, For God so loved, eternal life, believe, faith"
+                "never a bare \"3:16\" (it matches unrelated footnote citations).\n\n"
+                "Example:\n"
+                "DEPTH: simple\n"
+                "KEYWORDS: John 3:16, For God so loved, eternal life, believe, faith"
             ),
         }],
     )
-    return [k.strip() for k in response.content[0].text.strip().split(",") if k.strip()]
+    text = response.content[0].text.strip()
+
+    depth = DEFAULT_DEPTH
+    keyword_line = text
+    for line in text.splitlines():
+        line = line.strip()
+        if line.upper().startswith("DEPTH:"):
+            # Only "complex" escalates -- an unparseable or unexpected value
+            # falls back to the cheaper depth rather than silently costing 4x.
+            if line.split(":", 1)[1].strip().lower().startswith("complex"):
+                depth = "Deep"
+        elif line.upper().startswith("KEYWORDS:"):
+            keyword_line = line.split(":", 1)[1]
+
+    keywords = [k.strip() for k in keyword_line.split(",") if k.strip()]
+    return keywords, depth
 
 
 # A keyword that strips down to only digits/punctuation (e.g. a bare "3:16")
@@ -159,9 +208,9 @@ def build_fts_query(keywords: list[str]) -> str:
 #     bm25() directly, because bm25() cannot run inside a window function --
 #     `rank MATCH 'bm25(weights)'` is FTS5's documented way to set the same
 #     weights in a form that ROW_NUMBER() OVER (...) can sit next to.
-#  2. select_diverse() -- gate + guaranteed floor + merit fill in Python, so a
-#     handful of verse-indexed sources can't take every slot (see RETRIEVAL_CAP
-#     comment above for why a flat floor alone isn't enough).
+#  2. select_passages() -- gate + one guaranteed passage per qualifying source
+#     + merit fill in Python, so a handful of verse-indexed sources can't take
+#     every slot (see DEPTH_PRESETS above for why a flat floor isn't enough).
 # Only the winning ids get their chunk_text fetched, in fetch_texts_and_dedupe.
 
 
@@ -202,13 +251,42 @@ def fetch_candidates(
         return []
 
 
-def select_diverse(
+def expand_anchor(
+    conn: sqlite3.Connection,
+    anchor_id: int,
+    radius: int = PASSAGE_RADIUS,
+) -> list[int]:
+    """Chunk ids forming a contiguous passage centred on `anchor_id`.
+
+    build_index.py inserts chunks in document order -- page by page, chunk by
+    chunk within a page -- so consecutive ids are consecutive text of the same
+    PDF (verified against the production DB: ids 5000-5008 are pages 234-242 of
+    one volume). Expansion is clipped to the anchor's own (source, filename) so
+    a passage never runs off the end of one book into the start of the next --
+    filename alone is not unique, since build_index.py indexes same-named files
+    under different sources.
+    """
+    rows = conn.execute(
+        """
+        SELECT id FROM chunks
+        WHERE id BETWEEN ? AND ?
+          AND source   = (SELECT source   FROM chunks WHERE id = ?)
+          AND filename = (SELECT filename FROM chunks WHERE id = ?)
+        ORDER BY id
+        """,
+        (anchor_id - radius, anchor_id + radius, anchor_id, anchor_id),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def select_passages(
+    conn: sqlite3.Connection,
     candidates: list[sqlite3.Row],
-    cap: int = RETRIEVAL_CAP,
-    floor: int = FLOOR_PER_SOURCE,
-    gate_ratio: float = GATE_RATIO,
-) -> list[sqlite3.Row]:
-    """Pick up to `cap` candidates: a guaranteed floor per relevant source,
+    cap: int,
+    gate_ratio: float,
+    radius: int = PASSAGE_RADIUS,
+) -> list[int]:
+    """Pick up to `cap` chunk ids: one contiguous passage per relevant source,
     then fill by merit, capped so no single source can dominate the fill.
     `r` (rank) is more negative for a better match -- MIN(r) is the best score.
     """
@@ -224,32 +302,37 @@ def select_diverse(
     global_best = min(row["r"] for row in candidates)
     threshold = gate_ratio * global_best  # global_best is negative; threshold is less negative
     qualifying = [src for src, rows in by_source.items() if rows[0]["r"] <= threshold]
+    # Strongest sources claim their passage first, so that when the budget runs
+    # out it is the weakest matches that go unrepresented.
+    qualifying.sort(key=lambda src: by_source[src][0]["r"])
 
-    selected: list[sqlite3.Row] = []
-    selected_ids: set[int] = set()
+    selected: list[int] = []
+    seen: set[int] = set()
     per_source_count: dict[str, int] = {}
 
-    # Pass 1: guaranteed floor for every source that clears the relevance gate.
+    # Pass 1: one anchor per qualifying source, expanded into a passage.
     for src in qualifying:
-        for row in by_source[src][:floor]:
-            if row["rid"] not in selected_ids:
-                selected.append(row)
-                selected_ids.add(row["rid"])
-                per_source_count[src] = per_source_count.get(src, 0) + 1
+        if len(selected) >= cap:
+            break
+        for cid in expand_anchor(conn, by_source[src][0]["rid"], radius):
+            if cid in seen or len(selected) >= cap:
+                continue
+            seen.add(cid)
+            selected.append(cid)
+            per_source_count[src] = per_source_count.get(src, 0) + 1
 
     # Pass 2: merit fill, with a per-source cap so a handful of strong sources
-    # can't crowd out the diversity the floor pass just established.
-    n_qualified = max(len(qualifying), 1)
-    dominance_cap = max(6, (cap // n_qualified) * 2)
+    # can't crowd out the diversity the passage pass just established.
+    dominance_cap = max(2 * radius + 1, int(cap * MAX_SOURCE_SHARE))
     for row in sorted(candidates, key=lambda row: row["r"]):
         if len(selected) >= cap:
             break
-        if row["rid"] in selected_ids:
+        if row["rid"] in seen:
             continue
         if per_source_count.get(row["src"], 0) >= dominance_cap:
             continue
-        selected.append(row)
-        selected_ids.add(row["rid"])
+        seen.add(row["rid"])
+        selected.append(row["rid"])
         per_source_count[row["src"]] = per_source_count.get(row["src"], 0) + 1
 
     return selected[:cap]
@@ -257,7 +340,7 @@ def select_diverse(
 
 def fetch_texts_and_dedupe(
     conn: sqlite3.Connection,
-    selected: list[sqlite3.Row],
+    selected: list[int],
     candidates: list[sqlite3.Row],
     cap: int,
 ) -> list[sqlite3.Row]:
@@ -278,8 +361,8 @@ def fetch_texts_and_dedupe(
             ids,
         ).fetchall()
 
-    order = {row["rid"]: i for i, row in enumerate(selected)}
-    rows = fetch_by_ids([row["rid"] for row in selected])
+    order = {cid: i for i, cid in enumerate(selected)}
+    rows = fetch_by_ids(selected)
     rows.sort(key=lambda row: order.get(row["id"], len(order)))
 
     seen_hashes: set[str] = set()
@@ -310,17 +393,19 @@ def fts_search(
     conn: sqlite3.Connection,
     keywords: list[str],
     sources: list[str] | None = None,
-    cap: int = RETRIEVAL_CAP,
+    cap: int = DEPTH_PRESETS[DEFAULT_DEPTH]["cap"],
+    gate_ratio: float = DEPTH_PRESETS[DEFAULT_DEPTH]["gate_ratio"],
 ) -> list[sqlite3.Row]:
     """Retrieve up to `cap` chunks.
 
-    sources=None: search the whole corpus with the gate/floor/merit algorithm
-    in select_diverse(), so results aren't dominated by whichever source
+    sources=None: search the whole corpus with the gate/passage/merit algorithm
+    in select_passages(), so results aren't dominated by whichever source
     happens to be the most verse-indexed.
 
     sources=[...]: the user (or Compare mode) explicitly chose these sources --
     honor that choice directly and split `cap` evenly across them rather than
-    gating, since there's nothing to gate against.
+    gating, since there's nothing to gate against. Contiguous runs still get
+    stitched back together by format_context().
     """
     if not keywords:
         return []
@@ -329,24 +414,70 @@ def fts_search(
     if sources:
         per_source_cap = max(1, cap // len(sources))
         candidates = fetch_candidates(conn, fts_query, sources=sources, candidate_k=per_source_cap)
-        selected = sorted(candidates, key=lambda row: row["r"])[:cap]
+        selected = [row["rid"] for row in sorted(candidates, key=lambda row: row["r"])[:cap]]
     else:
         candidates = fetch_candidates(conn, fts_query, sources=None, candidate_k=CANDIDATE_K)
-        selected = select_diverse(candidates, cap=cap)
+        selected = select_passages(conn, candidates, cap=cap, gate_ratio=gate_ratio)
 
     return fetch_texts_and_dedupe(conn, selected, candidates, cap)
 
 
+def strip_overlap(previous: str, text: str, max_overlap: int = 60) -> str:
+    """Drop the leading words of `text` that repeat the tail of `previous`.
+
+    build_index.py overlaps chunks by OVERLAP words, but it chunks each page
+    separately -- so consecutive ids overlap only when they came from the same
+    page, and share nothing when they straddle a page boundary. The overlap is
+    therefore measured rather than assumed; stripping a fixed 50 words would
+    eat real text at every page break.
+    """
+    prev_words, words = previous.split(), text.split()
+    for n in range(min(max_overlap, len(prev_words), len(words)), 0, -1):
+        if prev_words[-n:] == words[:n]:
+            return " ".join(words[n:])
+    return text
+
+
 def format_context(rows: list[sqlite3.Row]) -> str:
+    """Render rows as excerpt blocks, merging contiguous chunks into a single
+    passage so the model sees continuous prose instead of the same passage
+    broken across repeated headers with its overlap duplicated.
+    """
     if not rows:
         return ""
-    parts = []
-    for row in rows:
-        parts.append(
-            f"[{row['source']} -- {row['filename']}, page {row['page_number']}]\n"
-            f"{row['chunk_text']}"
+
+    ordered = sorted(rows, key=lambda row: (row["source"], row["filename"], row["id"]))
+    blocks: list[str] = []
+    run: list[sqlite3.Row] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        first, last = run[0], run[-1]
+        pages = (
+            f"page {first['page_number']}"
+            if first["page_number"] == last["page_number"]
+            else f"pages {first['page_number']}-{last['page_number']}"
         )
-    return "\n\n---\n\n".join(parts)
+        text = first["chunk_text"]
+        for prev, cur in zip(run, run[1:]):
+            text += " " + strip_overlap(prev["chunk_text"], cur["chunk_text"])
+        blocks.append(f"[{first['source']} -- {first['filename']}, {pages}]\n{text}")
+        run.clear()
+
+    for row in ordered:
+        contiguous = (
+            run
+            and row["source"] == run[-1]["source"]
+            and row["filename"] == run[-1]["filename"]
+            and row["id"] == run[-1]["id"] + 1
+        )
+        if not contiguous:
+            flush()
+        run.append(row)
+    flush()
+
+    return "\n\n---\n\n".join(blocks)
 
 
 # -- Answer generation ---------------------------------------------------------
@@ -427,6 +558,19 @@ with st.sidebar:
         compare_mode = st.toggle("Compare selected sources", value=False)
 
     st.divider()
+    st.header("Depth")
+    depth_choice = st.radio(
+        "Search depth",
+        ["Auto", "Standard", "Deep"],
+        index=0,
+        help=(
+            "Auto reads the question: Standard for a single-verse lookup, "
+            "Deep for thematic or comparative questions. "
+            "Standard is ~$0.05 a question, Deep ~$0.20."
+        ),
+    )
+
+    st.divider()
     with st.expander("How to use"):
         st.markdown("""
 **What to ask**
@@ -464,12 +608,22 @@ if question := st.chat_input("Ask a question about the Bible..."):
     with st.status("Searching commentaries...", expanded=False) as status:
         all_rows: list[sqlite3.Row] = []
         context = ""
-        keywords = clean_keywords(generate_keywords(client, question))
+        raw_keywords, auto_depth = generate_query_plan(client, question)
+        keywords = clean_keywords(raw_keywords)
+
+        depth = auto_depth if depth_choice == "Auto" else depth_choice
+        preset = DEPTH_PRESETS[depth]
+        cap, gate_ratio = preset["cap"], preset["gate_ratio"]
+
         status.write(f"Keywords: {', '.join(keywords) or '(none usable)'}")
+        status.write(
+            f"Depth: {depth} ({cap} excerpts)"
+            + (" -- chosen automatically" if depth_choice == "Auto" else "")
+        )
 
         if compare_mode:
             # Split the retrieval budget evenly across the sources being compared.
-            per_source_cap = max(10, RETRIEVAL_CAP // len(selected_sources))
+            per_source_cap = max(10, cap // len(selected_sources))
             context_blocks = []
             for source in selected_sources:
                 rows = fts_search(conn, keywords, sources=[source], cap=per_source_cap)
@@ -481,14 +635,14 @@ if question := st.chat_input("Ask a question about the Bible..."):
 
         elif selected_sources:
             # User picked specific sources -- honor that directly, no gating.
-            all_rows = fts_search(conn, keywords, sources=selected_sources, cap=RETRIEVAL_CAP)
+            all_rows = fts_search(conn, keywords, sources=selected_sources, cap=cap)
             context = format_context(all_rows)
             status.write(f"{len(all_rows)} excerpts from {len(selected_sources)} selected source(s)")
 
         else:
-            # All sources -- gate/floor/merit selection decides what's relevant
+            # All sources -- gate/passage/merit selection decides what's relevant
             # by content, not by Claude guessing from filenames.
-            all_rows = fts_search(conn, keywords, sources=None, cap=RETRIEVAL_CAP)
+            all_rows = fts_search(conn, keywords, sources=None, cap=cap, gate_ratio=gate_ratio)
             context = format_context(all_rows)
             n_sources = len({row["source"] for row in all_rows})
             status.write(f"{len(all_rows)} excerpts from {n_sources} sources")
