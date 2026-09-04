@@ -482,7 +482,10 @@ def format_context(rows: list[sqlite3.Row]) -> str:
 
 # -- Answer generation ---------------------------------------------------------
 
-def build_system_prompt(compare_sources: list[str] | None = None) -> str:
+def build_system_prompt(
+    compare_sources: list[str] | None = None,
+    depth: str = DEFAULT_DEPTH,
+) -> str:
     base = (
         "You are a Bible commentary assistant. "
         "Answer using ONLY the commentary excerpts provided -- no outside knowledge, ever. "
@@ -490,12 +493,26 @@ def build_system_prompt(compare_sources: list[str] | None = None) -> str:
         "Every quote must be verbatim from the excerpts. "
         "If the excerpts do not contain commentary on the topic asked, say so plainly. "
         "Cite sources as: (Source -- filename, page N), using only page numbers from the excerpts.\n\n"
+        "Quote the fathers directly and often, in their own words and in full sentences, "
+        "rather than paraphrasing them. Their actual language is the point of this library. "
+        "Name the father wherever an excerpt identifies one, rather than citing only the "
+        "collection it came from.\n\n"
         "You will typically receive excerpts from many sources at once. Synthesize across them "
         "rather than walking through excerpts in order: organize the answer by theme or by "
-        "question, note where sources agree, and call out where they genuinely diverge. Prefer "
-        "breadth of witness over repeating one source at length -- if a source appears only once "
-        "or twice, that is still worth including, not a reason to skip it."
+        "question, note where sources agree, and call out where they genuinely diverge. "
+        "Include a source that appears only once or twice rather than skipping it."
     )
+    if depth == "Deep":
+        # Deep sends ~4x the excerpts because the question is thematic or
+        # doctrinal. Without this the model applies the same compression it
+        # would to a one-verse lookup and surveys 17 sources in two paragraphs.
+        base += (
+            "\n\nThis question was judged thematic or doctrinal, so you have been given a "
+            "large body of excerpts. Answer in proportion to it: develop each theme instead "
+            "of listing it, follow an argument through where a father makes one, and quote "
+            "substantially. Aim for a full treatment the reader can study from -- not a "
+            "summary of what is available."
+        )
     if compare_sources:
         names = " vs. ".join(compare_sources)
         base += (
@@ -513,6 +530,7 @@ def stream_answer(
     context: str,
     history: list[dict],
     compare_sources: list[str] | None,
+    depth: str = DEFAULT_DEPTH,
 ):
     messages = list(history[-(MAX_HISTORY * 2):])
     messages.append({
@@ -522,7 +540,7 @@ def stream_answer(
     with client.messages.stream(
         model=MODEL,
         max_tokens=16000,
-        system=build_system_prompt(compare_sources),
+        system=build_system_prompt(compare_sources, depth),
         messages=messages,
     ) as stream:
         for text in stream.text_stream:
@@ -668,6 +686,7 @@ if question := st.chat_input("Ask a question about the Bible..."):
             for chunk in stream_answer(
                 client, question, context, history_for_claude,
                 selected_sources if compare_mode else None,
+                depth,
             ):
                 full_answer += chunk
                 placeholder.markdown(full_answer + "▌")
