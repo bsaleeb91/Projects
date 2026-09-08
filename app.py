@@ -547,11 +547,134 @@ def stream_answer(
             yield text
 
 
+# -- About panel ---------------------------------------------------------------
+#
+# The sidebar is this app's hamburger -- Streamlit collapses it behind the "<<"
+# / hamburger control on narrow screens -- so it is where a new reader finds out
+# what the tool is before trusting an answer from it.
+#
+# Every claim in this copy is deliberately scoped to something the code actually
+# enforces: the quoting rules come from build_system_prompt(), the citation
+# format from format_context(), and the "no excerpts, no answer" behaviour from
+# the `if not context` branch below. The attribution caveat is here because
+# detect_source() labels chunks by folder, not author -- see ROADMAP.md P1. An
+# audience that knows patristics will find that limit on their own; better they
+# read it here first.
+
+ABOUT_INTRO = """
+Ask a question about Scripture and this app searches a library of patristic
+texts and commentaries, pulls the passages that match, and answers **from those
+passages only** -- quoting them and citing source and page.
+
+It is a way to read what the fathers actually wrote on a passage without
+knowing in advance which volume to open.
+"""
+
+HOW_TO_USE = """
+**What to ask**
+- *"What does John 3:16 mean?"*
+- *"What do the fathers say about baptism?"*
+- *"What does Chrysostom say about the Eucharist?"*
+
+Verse references work best. Plain questions work better than keywords -- the
+app builds its own search terms from what you ask.
+
+**Choosing sources**
+Leave the filter blank to search everything; the app picks the most relevant
+collections by what they actually contain. Select one to focus on it. Select
+two or more and toggle **Compare** for a side-by-side.
+
+**Depth**
+*Auto* reads the question -- Standard for a single-verse lookup, Deep for
+thematic or doctrinal questions that draw on many fathers. Deep sends about
+four times the material and costs about four times as much.
+
+**Check the work**
+Every answer has a **Sources used** expander listing the exact excerpts the
+answer was written from, with file and page. If something reads oddly, open it
+-- that is the whole text the model had.
+
+**Memory**
+The app remembers the last 10 turns, so follow-up questions work.
+"""
+
+WHY_TRUST = """
+The honest version, mechanism by mechanism.
+
+**It answers only from the library.**
+The model is instructed to use only the retrieved excerpts and no outside
+knowledge. It is not asked what it remembers about Chrysostom; it is handed
+pages and told to work from them.
+
+**Quotes must be verbatim.**
+Fabricating quotes, page numbers, or content that is not in the excerpts is
+forbidden. Quotations are meant to be the fathers' own words, not a smoothed
+paraphrase -- their actual language is the point of the library.
+
+**Citations come from the excerpts.**
+Each block of retrieved text carries its source, filename, and page number, and
+the answer must cite using those page numbers only.
+
+**Nothing matching means no answer.**
+If the search returns nothing, you get a plain "no matching content" notice
+rather than a guess. A question the library cannot answer is left unanswered on
+purpose.
+
+**You can audit any answer.**
+**Sources used** shows the retrieved excerpts in full. Anything in the answer
+should be traceable to something you can read there.
+
+---
+
+**Known limit: which father said it.**
+
+Sources are labelled by the collection a file came from, not by author. Large
+collections -- *Nicene and Post-Nicene Fathers*, *Ancient Christian
+Commentary*, *Fathers of the Church* -- each contain dozens of writers, and
+together they are roughly **46% of the library**. Inside those, a citation can
+name the volume and page without naming the writer, and where an excerpt does
+name one the app is repeating what the page says rather than checking it
+against author metadata it does not yet have.
+
+So: **the wording of a quote is reliable; who it belongs to may not be.**
+Before citing a father in writing or from the pulpit, open **Sources used** and
+confirm the attribution against the page itself.
+
+Author-level indexing is the next planned change to the library.
+"""
+
+
+@st.cache_data
+def get_library_counts(_conn) -> tuple[int, int, int]:
+    """(collections, files, chunks) for the whole indexed corpus."""
+    row = _conn.execute(
+        "SELECT COUNT(DISTINCT source), COUNT(DISTINCT filename), COUNT(*) FROM chunks"
+    ).fetchone()
+    return row[0], row[1], row[2]
+
+
+@st.cache_data
+def get_library_breakdown(_conn) -> list[tuple[str, int, int]]:
+    """(source, files, chunks) per collection, largest first."""
+    return [
+        (r[0], r[1], r[2])
+        for r in _conn.execute(
+            "SELECT source, COUNT(DISTINCT filename), COUNT(*) "
+            "FROM chunks GROUP BY source ORDER BY COUNT(*) DESC"
+        ).fetchall()
+    ]
+
+
 # -- UI ------------------------------------------------------------------------
 
 st.set_page_config(page_title="Bible Commentary", page_icon="📖", layout="wide")
 st.title("📖 Bible Commentary")
 st.caption("Answers drawn exclusively from your PDF commentary library.")
+st.caption(
+    "New here? Open the sidebar for what this is, how to use it, what is in the "
+    "library, and how it avoids misquoting the fathers. On a phone it is behind "
+    "the menu control in the top-left."
+)
 
 conn = get_db()
 if conn is None:
@@ -563,6 +686,32 @@ all_sources = get_sources(conn)
 
 # Sidebar
 with st.sidebar:
+    st.header("About")
+    st.markdown(ABOUT_INTRO)
+
+    with st.expander("What is in the library"):
+        n_sources, n_files, n_chunks = get_library_counts(conn)
+        st.markdown(
+            f"**{n_sources} collections · {n_files} PDFs · "
+            f"{n_chunks:,} indexed passages**"
+        )
+        st.markdown(
+            "Everything the app is able to answer from. Sizes vary enormously — "
+            "some collections are whole multi-volume series, others a single book."
+        )
+        for source, files, chunks in get_library_breakdown(conn):
+            st.markdown(
+                f"- **{source}** — {files} file{'s' if files != 1 else ''}, "
+                f"{chunks:,} passages"
+            )
+
+    with st.expander("How to use it"):
+        st.markdown(HOW_TO_USE)
+
+    with st.expander("How it avoids wrong quotes"):
+        st.markdown(WHY_TRUST)
+
+    st.divider()
     st.header("Sources")
     selected_sources = st.multiselect(
         "Filter by source",
@@ -588,27 +737,6 @@ with st.sidebar:
         ),
     )
 
-    st.divider()
-    with st.expander("How to use"):
-        st.markdown("""
-**What to ask**
-- *"What does John 3:16 mean?"*
-- *"What do the fathers say about baptism?"*
-- *"What does Chrysostom say about the Eucharist?"*
-
-**Selecting sources**
-Leave blank to search all sources -- the app picks the most relevant ones automatically.
-Select one to focus. Select two or more and toggle **Compare** for a side-by-side.
-
-**Hallucination prevention**
-Claude only uses retrieved excerpts -- never outside knowledge.
-The **Sources used** expander shows exactly what it had to work with.
-
-**Tips**
-- Be specific -- verse references work best
-- The app remembers the last 10 turns
-- If an answer seems off, check Sources used to verify
-""")
 
 st.divider()
 
