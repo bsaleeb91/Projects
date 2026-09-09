@@ -40,6 +40,10 @@ serves one class of 7th graders. Same user, same weekly deadline, adjacent job.
 - **Not a paraphraser.** The fathers are quoted, not summarized into Claude's
   voice. Model prose exists only to frame, connect, and label.
 - **No multi-user, no auth.** Same personal-use bar as the rest of the app.
+- **Nothing student-facing.** Every output is for the teacher preparing. No
+  handouts, no class-facing views, no student accounts. This is a deliberate
+  scope cut (2026-09-09), and it is what lets the whole thing run without a
+  Bible translation in the database — see §1 and Open Questions.
 - **No new index build.** Runs against `commentary.db` as it exists today.
 
 ---
@@ -63,9 +67,17 @@ Unresolvable input returns a clarifying prompt, not a guess.
 
 One document, ten sections. Rendered in-app, exported to Markdown and PDF.
 
-### 1. Passage
-The text, verse by verse, verse numbers preserved. Public-domain translation in
-the DB (see Open Questions — translation choice is unresolved).
+### 1. Passage — *reference only*
+The verse range and a one-line descriptive label per verse block ("vv. 11-13 —
+the younger son asks for his inheritance"), written by the model from the
+excerpts.
+
+**The document does not reprint the biblical text.** The teacher is preparing
+with a Bible already open, and nothing here is student-facing, so the text would
+be dead weight. This removes the need for a translation in `commentary.db`
+entirely — no licensing question, no versification question, nothing to load.
+
+Revisit only if something student-facing is ever added back.
 
 ### 2. The through-line
 One or two sentences: what this passage is about, as the fathers read it. Written
@@ -144,10 +156,6 @@ Youth (12-17) · 45 minutes · prepared 2026-09-09 · index v1
 
 ## The through-line
 [1-2 sentences, model-written, grounded in §4]
-
-## The passage
-11  A certain man had two sons...
-[...through v32]
 
 ## What the fathers say
 
@@ -375,10 +383,11 @@ Non-negotiable, not a later phase. Nobody teaches from a Streamlit page.
 | Format | Use | Implementation |
 |---|---|---|
 | Markdown | Notes apps, phone, editing | Direct |
-| PDF — teacher copy | Print, tablet | Markdown → PDF |
-| PDF — handout | Class copy: passage, questions, images; no teacher notes | Section subset |
+| PDF | Print, tablet | Markdown → PDF |
 
-The handout is a section filter, not a second generation.
+Both are the teacher's copy — the full document. A class handout was specced and
+cut (2026-09-09, nothing student-facing). If it ever returns it is a section
+filter over the same generation, not a second one.
 
 ---
 
@@ -444,7 +453,7 @@ If §3 on a familiar passage isn't worth reading, stop and fix retrieval instead
 **Phase 2 — the rest of the document.** Calls B–D, sections 2, 4–9, caching,
 verification.
 
-**Phase 3 — make it a tool.** Save/reopen, keep/drop review, PDF, handout.
+**Phase 3 — make it a tool.** Save/reopen, keep/drop review, PDF.
 
 **Phase 4 — measure.** Prepare four real lessons. Record keep/drop rates per
 source and per section. That is the first honest retrieval baseline this project
@@ -468,10 +477,12 @@ Deliberately about use, not scores:
 
 ## Open questions
 
-1. **Which Bible translation?** The DB has none. Needs a public-domain text
-   (KJV / WEB / Douay-Rheims) or a licensed one. For a Coptic Orthodox library,
-   LXX versification matters — see `ROADMAP.md` verse-spine notes on the Psalm
-   numbering offset. Blocks §1.
+1. ~~**Which Bible translation?**~~ **Resolved 2026-09-09: none needed.** With
+   nothing student-facing, §1 carries references and labels rather than verse
+   text, so no translation is loaded into `commentary.db`. This was the only
+   blocker on Phase 1. The question returns if anything student-facing does —
+   and it brings LXX versification with it (see `ROADMAP.md` verse-spine notes
+   on the Psalm numbering offset).
 2. **Verse-block splitting.** Model-chosen, or fixed at 3–5 verses? Model-chosen
    is better and less predictable. Start fixed, revisit.
 3. **Does §6 need its own pass?** Illustrations may be reliably extractable
